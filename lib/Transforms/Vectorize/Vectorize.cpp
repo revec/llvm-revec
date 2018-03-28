@@ -28,6 +28,7 @@ void llvm::initializeVectorization(PassRegistry &Registry) {
   initializeLoopVectorizePass(Registry);
   initializeSLPVectorizerPass(Registry);
   initializeLoadStoreVectorizerPass(Registry);
+  initializeRevectorizerPass(Registry);
 }
 
 void LLVMInitializeVectorization(LLVMPassRegistryRef R) {

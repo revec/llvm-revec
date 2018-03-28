@@ -3,6 +3,7 @@ add_llvm_library(LLVMVectorize
   LoopVectorizationLegality.cpp
   LoopVectorize.cpp
   SLPVectorizer.cpp
+  Revectorizer.cpp
   Vectorize.cpp
   VPlan.cpp
   VPlanHCFGBuilder.cpp

@@ -139,6 +139,12 @@ bool vectorizeBasicBlock(Pass *P, BasicBlock &BB,
 //
 Pass *createLoadStoreVectorizerPass();
 
+//===----------------------------------------------------------------------===//
+//
+// Revectorizer - Create a bottom-up vector lane-widening pass.
+//
+Pass *createRevectorizerPass();
+
 } // End llvm namespace
 
 #endif
