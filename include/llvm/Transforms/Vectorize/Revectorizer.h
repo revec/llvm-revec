@@ -57,7 +57,7 @@ class BoUpSLP;
 } // end namespace revectorizer
 
 
-struct SLPVectorizerPass : public PassInfoMixin<SLPVectorizerPass> {
+struct RevectorizerPass : public PassInfoMixin<RevectorizerPass> {
   using StoreList = SmallVector<StoreInst *, 8>;
   using StoreListMap = MapVector<Value *, StoreList>;
   using WeakTrackingVHList = SmallVector<WeakTrackingVH, 8>;

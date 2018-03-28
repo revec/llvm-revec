@@ -1039,7 +1039,7 @@ private:
     template <typename ReadyListType>
     void schedule(ScheduleData *SD, ReadyListType &ReadyList) {
       SD->IsScheduled = true;
-      DEBUG(dbgs() << "SLP:   schedule " << *SD << "\n");
+      DEBUG(dbgs() << "Revec:   schedule " << *SD << "\n");
 
       ScheduleData *BundleMember = SD;
       while (BundleMember) {
@@ -1063,7 +1063,7 @@ private:
                      "already scheduled bundle gets ready");
               ReadyList.insert(DepBundle);
               DEBUG(dbgs()
-                    << "SLP:    gets ready (def): " << *DepBundle << "\n");
+                    << "Revec:    gets ready (def): " << *DepBundle << "\n");
             }
           });
         }
@@ -1076,7 +1076,7 @@ private:
             assert(!DepBundle->IsScheduled &&
                    "already scheduled bundle gets ready");
             ReadyList.insert(DepBundle);
-            DEBUG(dbgs() << "SLP:    gets ready (mem): " << *DepBundle
+            DEBUG(dbgs() << "Revec:    gets ready (mem): " << *DepBundle
                          << "\n");
           }
         }
@@ -1102,7 +1102,7 @@ private:
         doForAllOpcodes(I, [&](ScheduleData *SD) {
           if (SD->isSchedulingEntity() && SD->isReady()) {
             ReadyList.insert(SD);
-            DEBUG(dbgs() << "SLP:    initially in ready list: " << *I << "\n");
+            DEBUG(dbgs() << "Revec:    initially in ready list: " << *I << "\n");
           }
         });
       }
@@ -1350,12 +1350,12 @@ void BoUpSLP::buildTree(ArrayRef<Value *> Roots,
       // Check if the scalar is externally used as an extra arg.
       auto ExtI = ExternallyUsedValues.find(Scalar);
       if (ExtI != ExternallyUsedValues.end()) {
-        DEBUG(dbgs() << "SLP: Need to extract: Extra arg from lane " <<
+        DEBUG(dbgs() << "Revec: Need to extract: Extra arg from lane " <<
               Lane << " from " << *Scalar << ".\n");
         ExternalUses.emplace_back(Scalar, nullptr, FoundLane);
       }
       for (User *U : Scalar->users()) {
-        DEBUG(dbgs() << "SLP: Checking user:" << *U << ".\n");
+        DEBUG(dbgs() << "Revec: Checking user:" << *U << ".\n");
 
         Instruction *UserInst = dyn_cast<Instruction>(U);
         if (!UserInst)
@@ -1369,7 +1369,7 @@ void BoUpSLP::buildTree(ArrayRef<Value *> Roots,
           // be used.
           if (UseScalar != U ||
               !InTreeUserNeedToExtract(Scalar, UserInst, TLI)) {
-            DEBUG(dbgs() << "SLP: \tInternal user will be removed:" << *U
+            DEBUG(dbgs() << "Revec: \tInternal user will be removed:" << *U
                          << ".\n");
             assert(!UseEntry->NeedToGather && "Bad state");
             continue;
@@ -1380,7 +1380,7 @@ void BoUpSLP::buildTree(ArrayRef<Value *> Roots,
         if (is_contained(UserIgnoreList, UserInst))
           continue;
 
-        DEBUG(dbgs() << "SLP: Need to extract:" << *U << " from lane " <<
+        DEBUG(dbgs() << "Revec: Need to extract:" << *U << " from lane " <<
               Lane << " from " << *Scalar << ".\n");
         ExternalUses.push_back(ExternalUser(Scalar, U, FoundLane));
       }
@@ -1394,28 +1394,28 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
 
   InstructionsState S = getSameOpcode(VL);
   if (Depth == RecursionMaxDepth) {
-    DEBUG(dbgs() << "SLP: Gathering due to max recursion depth.\n");
+    DEBUG(dbgs() << "Revec: Gathering due to max recursion depth.\n");
     newTreeEntry(VL, false, UserTreeIdx);
     return;
   }
 
   // Don't handle vectors.
   if (S.OpValue->getType()->isVectorTy()) {
-    DEBUG(dbgs() << "SLP: Gathering due to vector type.\n");
+    DEBUG(dbgs() << "Revec: Gathering due to vector type.\n");
     newTreeEntry(VL, false, UserTreeIdx);
     return;
   }
 
   if (StoreInst *SI = dyn_cast<StoreInst>(S.OpValue))
     if (SI->getValueOperand()->getType()->isVectorTy()) {
-      DEBUG(dbgs() << "SLP: Gathering due to store vector type.\n");
+      DEBUG(dbgs() << "Revec: Gathering due to store vector type.\n");
       newTreeEntry(VL, false, UserTreeIdx);
       return;
     }
 
   // If all of the operands are identical or constant we have a simple solution.
   if (allConstant(VL) || isSplat(VL) || !allSameBlock(VL) || !S.Opcode) {
-    DEBUG(dbgs() << "SLP: Gathering due to C,S,B,O. \n");
+    DEBUG(dbgs() << "Revec: Gathering due to C,S,B,O. \n");
     newTreeEntry(VL, false, UserTreeIdx);
     return;
   }
@@ -1426,7 +1426,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
   // Don't vectorize ephemeral values.
   for (unsigned i = 0, e = VL.size(); i != e; ++i) {
     if (EphValues.count(VL[i])) {
-      DEBUG(dbgs() << "SLP: The instruction (" << *VL[i] <<
+      DEBUG(dbgs() << "Revec: The instruction (" << *VL[i] <<
             ") is ephemeral.\n");
       newTreeEntry(VL, false, UserTreeIdx);
       return;
@@ -1435,16 +1435,16 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
 
   // Check if this is a duplicate of another entry.
   if (TreeEntry *E = getTreeEntry(S.OpValue)) {
-    DEBUG(dbgs() << "SLP: \tChecking bundle: " << *S.OpValue << ".\n");
+    DEBUG(dbgs() << "Revec: \tChecking bundle: " << *S.OpValue << ".\n");
     if (!E->isSame(VL)) {
-      DEBUG(dbgs() << "SLP: Gathering due to partial overlap.\n");
+      DEBUG(dbgs() << "Revec: Gathering due to partial overlap.\n");
       newTreeEntry(VL, false, UserTreeIdx);
       return;
     }
     // Record the reuse of the tree node.  FIXME, currently this is only used to
     // properly draw the graph rather than for the actual vectorization.
     E->UserTreeIndices.push_back(UserTreeIdx);
-    DEBUG(dbgs() << "SLP: Perfect diamond merge at " << *S.OpValue << ".\n");
+    DEBUG(dbgs() << "Revec: Perfect diamond merge at " << *S.OpValue << ".\n");
     return;
   }
 
@@ -1454,7 +1454,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
     if (!I)
       continue;
     if (getTreeEntry(I)) {
-      DEBUG(dbgs() << "SLP: The instruction (" << *VL[i] <<
+      DEBUG(dbgs() << "Revec: The instruction (" << *VL[i] <<
             ") is already in tree.\n");
       newTreeEntry(VL, false, UserTreeIdx);
       return;
@@ -1465,7 +1465,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
   // we need to gather the scalars.
   for (unsigned i = 0, e = VL.size(); i != e; ++i) {
     if (MustGather.count(VL[i])) {
-      DEBUG(dbgs() << "SLP: Gathering due to gathered scalar.\n");
+      DEBUG(dbgs() << "Revec: Gathering due to gathered scalar.\n");
       newTreeEntry(VL, false, UserTreeIdx);
       return;
     }
@@ -1479,7 +1479,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
   if (!DT->isReachableFromEntry(BB)) {
     // Don't go into unreachable blocks. They may contain instructions with
     // dependency cycles which confuse the final scheduling.
-    DEBUG(dbgs() << "SLP: bundle in unreachable block.\n");
+    DEBUG(dbgs() << "Revec: bundle in unreachable block.\n");
     newTreeEntry(VL, false, UserTreeIdx);
     return;
   }
@@ -1497,9 +1497,9 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
   if (UniqueValues.size() == VL.size()) {
     ReuseShuffleIndicies.clear();
   } else {
-    DEBUG(dbgs() << "SLP: Shuffle for reused scalars.\n");
+    DEBUG(dbgs() << "Revec: Shuffle for reused scalars.\n");
     if (UniqueValues.size() <= 1 || !llvm::isPowerOf2_32(UniqueValues.size())) {
-      DEBUG(dbgs() << "SLP: Scalar used twice in bundle.\n");
+      DEBUG(dbgs() << "Revec: Scalar used twice in bundle.\n");
       newTreeEntry(VL, false, UserTreeIdx);
       return;
     }
@@ -1513,14 +1513,14 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
   BlockScheduling &BS = *BSRef.get();
 
   if (!BS.tryScheduleBundle(VL, this, VL0)) {
-    DEBUG(dbgs() << "SLP: We are not able to schedule this bundle!\n");
+    DEBUG(dbgs() << "Revec: We are not able to schedule this bundle!\n");
     assert((!BS.getScheduleData(VL0) ||
             !BS.getScheduleData(VL0)->isPartOfBundle()) &&
            "tryScheduleBundle should cancelScheduling on failure");
     newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
     return;
   }
-  DEBUG(dbgs() << "SLP: We are able to schedule this bundle.\n");
+  DEBUG(dbgs() << "Revec: We are able to schedule this bundle.\n");
 
   unsigned ShuffleOrOp = S.IsAltShuffle ?
                 (unsigned) Instruction::ShuffleVector : S.Opcode;
@@ -1534,7 +1534,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
           TerminatorInst *Term = dyn_cast<TerminatorInst>(
               cast<PHINode>(VL[j])->getIncomingValueForBlock(PH->getIncomingBlock(i)));
           if (Term) {
-            DEBUG(dbgs() << "SLP: Need to swizzle PHINodes (TerminatorInst use).\n");
+            DEBUG(dbgs() << "Revec: Need to swizzle PHINodes (TerminatorInst use).\n");
             BS.cancelScheduling(VL, VL0);
             newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
             return;
@@ -1542,7 +1542,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
         }
 
       newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndicies);
-      DEBUG(dbgs() << "SLP: added a vector of PHINodes.\n");
+      DEBUG(dbgs() << "Revec: added a vector of PHINodes.\n");
 
       for (unsigned i = 0, e = PH->getNumIncomingValues(); i < e; ++i) {
         ValueList Operands;
@@ -1559,7 +1559,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
     case Instruction::ExtractElement: {
       bool Reuse = canReuseExtract(VL, VL0);
       if (Reuse) {
-        DEBUG(dbgs() << "SLP: Reusing or shuffling extract sequence.\n");
+        DEBUG(dbgs() << "Revec: Reusing or shuffling extract sequence.\n");
         ++NumOpsWantToKeepOrder[S.Opcode];
       } else {
         SmallVector<Value *, 4> ReverseVL(VL.rbegin(), VL.rend());
@@ -1583,7 +1583,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
           DL->getTypeAllocSizeInBits(ScalarTy)) {
         BS.cancelScheduling(VL, VL0);
         newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
-        DEBUG(dbgs() << "SLP: Gathering loads of non-packed type.\n");
+        DEBUG(dbgs() << "Revec: Gathering loads of non-packed type.\n");
         return;
       }
 
@@ -1594,7 +1594,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
         if (!L->isSimple()) {
           BS.cancelScheduling(VL, VL0);
           newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
-          DEBUG(dbgs() << "SLP: Gathering non-simple loads.\n");
+          DEBUG(dbgs() << "Revec: Gathering non-simple loads.\n");
           return;
         }
       }
@@ -1616,7 +1616,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
       if (Consecutive) {
         ++NumOpsWantToKeepOrder[S.Opcode];
         newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndicies);
-        DEBUG(dbgs() << "SLP: added a vector of loads.\n");
+        DEBUG(dbgs() << "Revec: added a vector of loads.\n");
         return;
       }
 
@@ -1632,11 +1632,11 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
       if (ReverseConsecutive) {
         --NumOpsWantToKeepOrder[S.Opcode];
         newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndicies);
-        DEBUG(dbgs() << "SLP: added a vector of reversed loads.\n");
+        DEBUG(dbgs() << "Revec: added a vector of reversed loads.\n");
         return;
       }
 
-      DEBUG(dbgs() << "SLP: Gathering non-consecutive loads.\n");
+      DEBUG(dbgs() << "Revec: Gathering non-consecutive loads.\n");
       BS.cancelScheduling(VL, VL0);
       newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
       return;
@@ -1659,12 +1659,12 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
         if (Ty != SrcTy || !isValidElementType(Ty)) {
           BS.cancelScheduling(VL, VL0);
           newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
-          DEBUG(dbgs() << "SLP: Gathering casts with different src types.\n");
+          DEBUG(dbgs() << "Revec: Gathering casts with different src types.\n");
           return;
         }
       }
       newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndicies);
-      DEBUG(dbgs() << "SLP: added a vector of casts.\n");
+      DEBUG(dbgs() << "Revec: added a vector of casts.\n");
 
       for (unsigned i = 0, e = VL0->getNumOperands(); i < e; ++i) {
         ValueList Operands;
@@ -1687,13 +1687,13 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
             Cmp->getOperand(0)->getType() != ComparedTy) {
           BS.cancelScheduling(VL, VL0);
           newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
-          DEBUG(dbgs() << "SLP: Gathering cmp with different predicate.\n");
+          DEBUG(dbgs() << "Revec: Gathering cmp with different predicate.\n");
           return;
         }
       }
 
       newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndicies);
-      DEBUG(dbgs() << "SLP: added a vector of compares.\n");
+      DEBUG(dbgs() << "Revec: added a vector of compares.\n");
 
       for (unsigned i = 0, e = VL0->getNumOperands(); i < e; ++i) {
         ValueList Operands;
@@ -1725,7 +1725,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
     case Instruction::Or:
     case Instruction::Xor:
       newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndicies);
-      DEBUG(dbgs() << "SLP: added a vector of bin op.\n");
+      DEBUG(dbgs() << "Revec: added a vector of bin op.\n");
 
       // Sort operands of the instructions so that each side is more likely to
       // have the same opcode.
@@ -1751,7 +1751,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
       // We don't combine GEPs with complicated (nested) indexing.
       for (unsigned j = 0; j < VL.size(); ++j) {
         if (cast<Instruction>(VL[j])->getNumOperands() != 2) {
-          DEBUG(dbgs() << "SLP: not-vectorizable GEP (nested indexes).\n");
+          DEBUG(dbgs() << "Revec: not-vectorizable GEP (nested indexes).\n");
           BS.cancelScheduling(VL, VL0);
           newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
           return;
@@ -1764,7 +1764,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
       for (unsigned j = 0; j < VL.size(); ++j) {
         Type *CurTy = cast<Instruction>(VL[j])->getOperand(0)->getType();
         if (Ty0 != CurTy) {
-          DEBUG(dbgs() << "SLP: not-vectorizable GEP (different types).\n");
+          DEBUG(dbgs() << "Revec: not-vectorizable GEP (different types).\n");
           BS.cancelScheduling(VL, VL0);
           newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
           return;
@@ -1776,7 +1776,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
         auto Op = cast<Instruction>(VL[j])->getOperand(1);
         if (!isa<ConstantInt>(Op)) {
           DEBUG(
-              dbgs() << "SLP: not-vectorizable GEP (non-constant indexes).\n");
+              dbgs() << "Revec: not-vectorizable GEP (non-constant indexes).\n");
           BS.cancelScheduling(VL, VL0);
           newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
           return;
@@ -1784,7 +1784,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
       }
 
       newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndicies);
-      DEBUG(dbgs() << "SLP: added a vector of GEPs.\n");
+      DEBUG(dbgs() << "Revec: added a vector of GEPs.\n");
       for (unsigned i = 0, e = 2; i < e; ++i) {
         ValueList Operands;
         // Prepare the operand vector.
@@ -1801,12 +1801,12 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
         if (!isConsecutiveAccess(VL[i], VL[i + 1], *DL, *SE)) {
           BS.cancelScheduling(VL, VL0);
           newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
-          DEBUG(dbgs() << "SLP: Non-consecutive store.\n");
+          DEBUG(dbgs() << "Revec: Non-consecutive store.\n");
           return;
         }
 
       newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndicies);
-      DEBUG(dbgs() << "SLP: added a vector of stores.\n");
+      DEBUG(dbgs() << "Revec: added a vector of stores.\n");
 
       ValueList Operands;
       for (Value *j : VL)
@@ -1824,7 +1824,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
       if (!isTriviallyVectorizable(ID)) {
         BS.cancelScheduling(VL, VL0);
         newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
-        DEBUG(dbgs() << "SLP: Non-vectorizable call.\n");
+        DEBUG(dbgs() << "Revec: Non-vectorizable call.\n");
         return;
       }
       Function *Int = CI->getCalledFunction();
@@ -1838,7 +1838,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
             !CI->hasIdenticalOperandBundleSchema(*CI2)) {
           BS.cancelScheduling(VL, VL0);
           newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
-          DEBUG(dbgs() << "SLP: mismatched calls:" << *CI << "!=" << *VL[i]
+          DEBUG(dbgs() << "Revec: mismatched calls:" << *CI << "!=" << *VL[i]
                        << "\n");
           return;
         }
@@ -1849,7 +1849,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
           if (A1I != A1J) {
             BS.cancelScheduling(VL, VL0);
             newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
-            DEBUG(dbgs() << "SLP: mismatched arguments in call:" << *CI
+            DEBUG(dbgs() << "Revec: mismatched arguments in call:" << *CI
                          << " argument "<< A1I<<"!=" << A1J
                          << "\n");
             return;
@@ -1862,7 +1862,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
                         CI2->op_begin() + CI2->getBundleOperandsStartIndex())) {
           BS.cancelScheduling(VL, VL0);
           newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
-          DEBUG(dbgs() << "SLP: mismatched bundle operands in calls:" << *CI << "!="
+          DEBUG(dbgs() << "Revec: mismatched bundle operands in calls:" << *CI << "!="
                        << *VL[i] << '\n');
           return;
         }
@@ -1886,11 +1886,11 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
       if (!S.IsAltShuffle) {
         BS.cancelScheduling(VL, VL0);
         newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
-        DEBUG(dbgs() << "SLP: ShuffleVector are not vectorized.\n");
+        DEBUG(dbgs() << "Revec: ShuffleVector are not vectorized.\n");
         return;
       }
       newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndicies);
-      DEBUG(dbgs() << "SLP: added a ShuffleVector op.\n");
+      DEBUG(dbgs() << "Revec: added a ShuffleVector op.\n");
 
       // Reorder operands if reordering would enable vectorization.
       if (isa<BinaryOperator>(VL0)) {
@@ -1914,7 +1914,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
     default:
       BS.cancelScheduling(VL, VL0);
       newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
-      DEBUG(dbgs() << "SLP: Gathering unknown instruction.\n");
+      DEBUG(dbgs() << "Revec: Gathering unknown instruction.\n");
       return;
   }
 }
@@ -2291,7 +2291,7 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       int VecCallCost = TTI->getIntrinsicInstrCost(ID, CI->getType(), Args, FMF,
                                                    VecTy->getNumElements());
 
-      DEBUG(dbgs() << "SLP: Call cost "<< VecCallCost - ScalarCallCost
+      DEBUG(dbgs() << "Revec: Call cost "<< VecCallCost - ScalarCallCost
             << " (" << VecCallCost  << "-" <<  ScalarCallCost << ")"
             << " for " << *CI << "\n");
 
@@ -2345,7 +2345,7 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
 }
 
 bool BoUpSLP::isFullyVectorizableTinyTree() {
-  DEBUG(dbgs() << "SLP: Check whether the tree with height " <<
+  DEBUG(dbgs() << "Revec: Check whether the tree with height " <<
         VectorizableTree.size() << " is fully vectorizable .\n");
 
   // We only handle trees of heights 1 and 2.
@@ -2417,7 +2417,7 @@ int BoUpSLP::getSpillCost() {
     }
 
     DEBUG(
-      dbgs() << "SLP: #LV: " << LiveValues.size();
+      dbgs() << "Revec: #LV: " << LiveValues.size();
       for (auto *X : LiveValues)
         dbgs() << " " << X->getName();
       dbgs() << ", Looking at ";
@@ -2452,7 +2452,7 @@ int BoUpSLP::getSpillCost() {
 
 int BoUpSLP::getTreeCost() {
   int Cost = 0;
-  DEBUG(dbgs() << "SLP: Calculating cost for tree of size " <<
+  DEBUG(dbgs() << "Revec: Calculating cost for tree of size " <<
         VectorizableTree.size() << ".\n");
 
   unsigned BundleWidth = VectorizableTree[0].Scalars.size();
@@ -2480,7 +2480,7 @@ int BoUpSLP::getTreeCost() {
       continue;
 
     int C = getEntryCost(&TE);
-    DEBUG(dbgs() << "SLP: Adding cost " << C << " for bundle that starts with "
+    DEBUG(dbgs() << "Revec: Adding cost " << C << " for bundle that starts with "
                  << *TE.Scalars[0] << ".\n");
     Cost += C;
   }
@@ -2522,9 +2522,9 @@ int BoUpSLP::getTreeCost() {
   std::string Str;
   {
     raw_string_ostream OS(Str);
-    OS << "SLP: Spill Cost = " << SpillCost << ".\n"
-       << "SLP: Extract Cost = " << ExtractCost << ".\n"
-       << "SLP: Total Cost = " << Cost << ".\n";
+    OS << "Revec: Spill Cost = " << SpillCost << ".\n"
+       << "Revec: Extract Cost = " << ExtractCost << ".\n"
+       << "Revec: Total Cost = " << Cost << ".\n";
   }
   DEBUG(dbgs() << Str);
 
@@ -2948,7 +2948,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
   IRBuilder<>::InsertPointGuard Guard(Builder);
 
   if (E->VectorizedValue) {
-    DEBUG(dbgs() << "SLP: Diamond merged for " << *E->Scalars[0] << ".\n");
+    DEBUG(dbgs() << "Revec: Diamond merged for " << *E->Scalars[0] << ".\n");
     return E->VectorizedValue;
   }
 
@@ -3092,7 +3092,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       Value *InVec = vectorizeTree(INVL);
 
       if (E->VectorizedValue) {
-        DEBUG(dbgs() << "SLP: Diamond merged for " << *VL0 << ".\n");
+        DEBUG(dbgs() << "Revec: Diamond merged for " << *VL0 << ".\n");
         return E->VectorizedValue;
       }
 
@@ -3120,7 +3120,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       Value *R = vectorizeTree(RHSV);
 
       if (E->VectorizedValue) {
-        DEBUG(dbgs() << "SLP: Diamond merged for " << *VL0 << ".\n");
+        DEBUG(dbgs() << "Revec: Diamond merged for " << *VL0 << ".\n");
         return E->VectorizedValue;
       }
 
@@ -3155,7 +3155,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       Value *False = vectorizeTree(FalseVec);
 
       if (E->VectorizedValue) {
-        DEBUG(dbgs() << "SLP: Diamond merged for " << *VL0 << ".\n");
+        DEBUG(dbgs() << "Revec: Diamond merged for " << *VL0 << ".\n");
         return E->VectorizedValue;
       }
 
@@ -3203,7 +3203,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       Value *RHS = vectorizeTree(RHSVL);
 
       if (E->VectorizedValue) {
-        DEBUG(dbgs() << "SLP: Diamond merged for " << *VL0 << ".\n");
+        DEBUG(dbgs() << "Revec: Diamond merged for " << *VL0 << ".\n");
         return E->VectorizedValue;
       }
 
@@ -3360,7 +3360,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
         }
 
         Value *OpVec = vectorizeTree(OpVL);
-        DEBUG(dbgs() << "SLP: OpVec[" << j << "]: " << *OpVec << "\n");
+        DEBUG(dbgs() << "Revec: OpVec[" << j << "]: " << *OpVec << "\n");
         OpVecs.push_back(OpVec);
       }
 
@@ -3398,7 +3398,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       Value *RHS = vectorizeTree(RHSVL);
 
       if (E->VectorizedValue) {
-        DEBUG(dbgs() << "SLP: Diamond merged for " << *VL0 << ".\n");
+        DEBUG(dbgs() << "Revec: Diamond merged for " << *VL0 << ".\n");
         return E->VectorizedValue;
       }
 
@@ -3478,7 +3478,7 @@ BoUpSLP::vectorizeTree(ExtraValueToDebugLocsMap &ExternallyUsedValues) {
     VectorizableTree[0].VectorizedValue = Trunc;
   }
 
-  DEBUG(dbgs() << "SLP: Extracting " << ExternalUses.size() << " values .\n");
+  DEBUG(dbgs() << "Revec: Extracting " << ExternalUses.size() << " values .\n");
 
   // If necessary, sign-extend or zero-extend ScalarRoot to the larger type
   // specified by ScalarType.
@@ -3564,7 +3564,7 @@ BoUpSLP::vectorizeTree(ExtraValueToDebugLocsMap &ExternallyUsedValues) {
       User->replaceUsesOfWith(Scalar, Ex);
     }
 
-    DEBUG(dbgs() << "SLP: Replaced:" << *User << ".\n");
+    DEBUG(dbgs() << "Revec: Replaced:" << *User << ".\n");
   }
 
   // For each vectorized value:
@@ -3585,7 +3585,7 @@ BoUpSLP::vectorizeTree(ExtraValueToDebugLocsMap &ExternallyUsedValues) {
       if (!Ty->isVoidTy()) {
 #ifndef NDEBUG
         for (User *U : Scalar->users()) {
-          DEBUG(dbgs() << "SLP: \tvalidating user:" << *U << ".\n");
+          DEBUG(dbgs() << "Revec: \tvalidating user:" << *U << ".\n");
 
           // It is legal to replace users in the ignorelist by undef.
           assert((getTreeEntry(U) || is_contained(UserIgnoreList, U)) &&
@@ -3595,7 +3595,7 @@ BoUpSLP::vectorizeTree(ExtraValueToDebugLocsMap &ExternallyUsedValues) {
         Value *Undef = UndefValue::get(Ty);
         Scalar->replaceAllUsesWith(Undef);
       }
-      DEBUG(dbgs() << "SLP: \tErasing scalar:" << *Scalar << ".\n");
+      DEBUG(dbgs() << "Revec: \tErasing scalar:" << *Scalar << ".\n");
       eraseInstruction(cast<Instruction>(Scalar));
     }
   }
@@ -3606,7 +3606,7 @@ BoUpSLP::vectorizeTree(ExtraValueToDebugLocsMap &ExternallyUsedValues) {
 }
 
 void BoUpSLP::optimizeGatherSequence() {
-  DEBUG(dbgs() << "SLP: Optimizing " << GatherSeq.size()
+  DEBUG(dbgs() << "Revec: Optimizing " << GatherSeq.size()
         << " gather sequences instructions.\n");
   // LICM InsertElementInst sequences.
   for (Instruction *I : GatherSeq) {
@@ -3700,7 +3700,7 @@ bool BoUpSLP::BlockScheduling::tryScheduleBundle(ArrayRef<Value *> VL,
   ScheduleData *PrevInBundle = nullptr;
   ScheduleData *Bundle = nullptr;
   bool ReSchedule = false;
-  DEBUG(dbgs() << "SLP:  bundle: " << *OpValue << "\n");
+  DEBUG(dbgs() << "Revec:  bundle: " << *OpValue << "\n");
 
   // Make sure that the scheduling region contains all
   // instructions of the bundle.
@@ -3717,7 +3717,7 @@ bool BoUpSLP::BlockScheduling::tryScheduleBundle(ArrayRef<Value *> VL,
       // A bundle member was scheduled as single instruction before and now
       // needs to be scheduled as part of the bundle. We just get rid of the
       // existing schedule.
-      DEBUG(dbgs() << "SLP:  reset schedule because " << *BundleMember
+      DEBUG(dbgs() << "Revec:  reset schedule because " << *BundleMember
                    << " was already scheduled\n");
       ReSchedule = true;
     }
@@ -3753,7 +3753,7 @@ bool BoUpSLP::BlockScheduling::tryScheduleBundle(ArrayRef<Value *> VL,
     initialFillReadyList(ReadyInsts);
   }
 
-  DEBUG(dbgs() << "SLP: try schedule bundle " << *Bundle << " in block "
+  DEBUG(dbgs() << "Revec: try schedule bundle " << *Bundle << " in block "
                << BB->getName() << "\n");
 
   calculateDependencies(Bundle, true, SLP);
@@ -3784,7 +3784,7 @@ void BoUpSLP::BlockScheduling::cancelScheduling(ArrayRef<Value *> VL,
     return;
 
   ScheduleData *Bundle = getScheduleData(OpValue);
-  DEBUG(dbgs() << "SLP:  cancel scheduling of " << *Bundle << "\n");
+  DEBUG(dbgs() << "Revec:  cancel scheduling of " << *Bundle << "\n");
   assert(!Bundle->IsScheduled &&
          "Can't cancel bundle which is already scheduled");
   assert(Bundle->isSchedulingEntity() && Bundle->isPartOfBundle() &&
@@ -3843,7 +3843,7 @@ bool BoUpSLP::BlockScheduling::extendSchedulingRegion(Value *V,
     if (isOneOf(OpValue, I) != I)
       CheckSheduleForI(I);
     assert(ScheduleEnd && "tried to vectorize a TerminatorInst?");
-    DEBUG(dbgs() << "SLP:  initialize schedule region to " << *I << "\n");
+    DEBUG(dbgs() << "Revec:  initialize schedule region to " << *I << "\n");
     return true;
   }
   // Search up and down at the same time, because we don't know if the new
@@ -3855,7 +3855,7 @@ bool BoUpSLP::BlockScheduling::extendSchedulingRegion(Value *V,
   BasicBlock::iterator LowerEnd = BB->end();
   while (true) {
     if (++ScheduleRegionSize > ScheduleRegionSizeLimit) {
-      DEBUG(dbgs() << "SLP:  exceeded schedule region size limit\n");
+      DEBUG(dbgs() << "Revec:  exceeded schedule region size limit\n");
       return false;
     }
 
@@ -3865,7 +3865,7 @@ bool BoUpSLP::BlockScheduling::extendSchedulingRegion(Value *V,
         ScheduleStart = I;
         if (isOneOf(OpValue, I) != I)
           CheckSheduleForI(I);
-        DEBUG(dbgs() << "SLP:  extend schedule region start to " << *I << "\n");
+        DEBUG(dbgs() << "Revec:  extend schedule region start to " << *I << "\n");
         return true;
       }
       UpIter++;
@@ -3878,7 +3878,7 @@ bool BoUpSLP::BlockScheduling::extendSchedulingRegion(Value *V,
         if (isOneOf(OpValue, I) != I)
           CheckSheduleForI(I);
         assert(ScheduleEnd && "tried to vectorize a TerminatorInst?");
-        DEBUG(dbgs() << "SLP:  extend schedule region end to " << *I << "\n");
+        DEBUG(dbgs() << "Revec:  extend schedule region end to " << *I << "\n");
         return true;
       }
       DownIter++;
@@ -3942,7 +3942,7 @@ void BoUpSLP::BlockScheduling::calculateDependencies(ScheduleData *SD,
       assert(isInSchedulingRegion(BundleMember));
       if (!BundleMember->hasValidDependencies()) {
 
-        DEBUG(dbgs() << "SLP:       update deps of " << *BundleMember << "\n");
+        DEBUG(dbgs() << "Revec:       update deps of " << *BundleMember << "\n");
         BundleMember->Dependencies = 0;
         BundleMember->resetUnscheduledDeps();
 
@@ -4043,7 +4043,7 @@ void BoUpSLP::BlockScheduling::calculateDependencies(ScheduleData *SD,
     }
     if (InsertInReadyList && SD->isReady()) {
       ReadyInsts.push_back(SD);
-      DEBUG(dbgs() << "SLP:     gets ready on update: " << *SD->Inst << "\n");
+      DEBUG(dbgs() << "Revec:     gets ready on update: " << *SD->Inst << "\n");
     }
   }
 }
@@ -4066,7 +4066,7 @@ void BoUpSLP::scheduleBlock(BlockScheduling *BS) {
   if (!BS->ScheduleStart)
     return;
 
-  DEBUG(dbgs() << "SLP: schedule block " << BS->BB->getName() << "\n");
+  DEBUG(dbgs() << "Revec: schedule block " << BS->BB->getName() << "\n");
 
   BS->resetSchedule();
 
@@ -4408,7 +4408,7 @@ namespace {
 
 /// The Revectorizer Pass.
 struct Revectorizer : public FunctionPass {
-  SLPVectorizerPass Impl;
+  RevectorizerPass Impl;
 
   /// Pass identification, replacement for typeid
   static char ID;
@@ -4459,7 +4459,7 @@ struct Revectorizer : public FunctionPass {
 
 } // end anonymous namespace
 
-PreservedAnalyses SLPVectorizerPass::run(Function &F, FunctionAnalysisManager &AM) {
+PreservedAnalyses RevectorizerPass::run(Function &F, FunctionAnalysisManager &AM) {
   auto *SE = &AM.getResult<ScalarEvolutionAnalysis>(F);
   auto *TTI = &AM.getResult<TargetIRAnalysis>(F);
   auto *TLI = AM.getCachedResult<TargetLibraryAnalysis>(F);
@@ -4481,7 +4481,7 @@ PreservedAnalyses SLPVectorizerPass::run(Function &F, FunctionAnalysisManager &A
   return PA;
 }
 
-bool SLPVectorizerPass::runImpl(Function &F, ScalarEvolution *SE_,
+bool RevectorizerPass::runImpl(Function &F, ScalarEvolution *SE_,
                                 TargetTransformInfo *TTI_,
                                 TargetLibraryInfo *TLI_, AliasAnalysis *AA_,
                                 LoopInfo *LI_, DominatorTree *DT_,
@@ -4510,7 +4510,7 @@ bool SLPVectorizerPass::runImpl(Function &F, ScalarEvolution *SE_,
   if (F.hasFnAttribute(Attribute::NoImplicitFloat))
     return false;
 
-  DEBUG(dbgs() << "SLP: Analyzing blocks in " << F.getName() << ".\n");
+  DEBUG(dbgs() << "Revec: Analyzing blocks in " << F.getName() << ".\n");
 
   // Use the bottom up slp vectorizer to construct chains that start with
   // store instructions.
@@ -4525,7 +4525,7 @@ bool SLPVectorizerPass::runImpl(Function &F, ScalarEvolution *SE_,
 
     // Vectorize trees that end at stores.
     if (!Stores.empty()) {
-      DEBUG(dbgs() << "SLP: Found stores for " << Stores.size()
+      DEBUG(dbgs() << "Revec: Found stores for " << Stores.size()
                    << " underlying objects.\n");
       Changed |= vectorizeStoreChains(R);
     }
@@ -4537,7 +4537,7 @@ bool SLPVectorizerPass::runImpl(Function &F, ScalarEvolution *SE_,
     // is primarily intended to catch gather-like idioms ending at
     // non-consecutive loads.
     if (!GEPs.empty()) {
-      DEBUG(dbgs() << "SLP: Found GEPs for " << GEPs.size()
+      DEBUG(dbgs() << "Revec: Found GEPs for " << GEPs.size()
                    << " underlying objects.\n");
       Changed |= vectorizeGEPIndices(BB, R);
     }
@@ -4545,7 +4545,7 @@ bool SLPVectorizerPass::runImpl(Function &F, ScalarEvolution *SE_,
 
   if (Changed) {
     R.optimizeGatherSequence();
-    DEBUG(dbgs() << "SLP: vectorized \"" << F.getName() << "\"\n");
+    DEBUG(dbgs() << "Revec: vectorized \"" << F.getName() << "\"\n");
     DEBUG(verifyFunction(F));
   }
   return Changed;
@@ -4564,10 +4564,10 @@ static bool hasValueBeenRAUWed(ArrayRef<Value *> VL,
   return !std::equal(VL.begin(), VL.end(), VH.begin());
 }
 
-bool SLPVectorizerPass::vectorizeStoreChain(ArrayRef<Value *> Chain, BoUpSLP &R,
+bool RevectorizerPass::vectorizeStoreChain(ArrayRef<Value *> Chain, BoUpSLP &R,
                                             unsigned VecRegSize) {
   const unsigned ChainLen = Chain.size();
-  DEBUG(dbgs() << "SLP: Analyzing a store chain of length " << ChainLen
+  DEBUG(dbgs() << "Revec: Analyzing a store chain of length " << ChainLen
         << "\n");
   const unsigned Sz = R.getVectorElementSize(Chain[0]);
   const unsigned VF = VecRegSize / Sz;
@@ -4586,7 +4586,7 @@ bool SLPVectorizerPass::vectorizeStoreChain(ArrayRef<Value *> Chain, BoUpSLP &R,
     if (hasValueBeenRAUWed(Chain, TrackValues, i, VF))
       continue;
 
-    DEBUG(dbgs() << "SLP: Analyzing " << VF << " stores at offset " << i
+    DEBUG(dbgs() << "Revec: Analyzing " << VF << " stores at offset " << i
           << "\n");
     ArrayRef<Value *> Operands = Chain.slice(i, VF);
 
@@ -4598,9 +4598,9 @@ bool SLPVectorizerPass::vectorizeStoreChain(ArrayRef<Value *> Chain, BoUpSLP &R,
 
     int Cost = R.getTreeCost();
 
-    DEBUG(dbgs() << "SLP: Found cost=" << Cost << " for VF=" << VF << "\n");
+    DEBUG(dbgs() << "Revec: Found cost=" << Cost << " for VF=" << VF << "\n");
     if (Cost < -SLPCostThreshold) {
-      DEBUG(dbgs() << "SLP: Decided to vectorize cost=" << Cost << "\n");
+      DEBUG(dbgs() << "Revec: Decided to vectorize cost=" << Cost << "\n");
 
       using namespace ore;
 
@@ -4621,7 +4621,7 @@ bool SLPVectorizerPass::vectorizeStoreChain(ArrayRef<Value *> Chain, BoUpSLP &R,
   return Changed;
 }
 
-bool SLPVectorizerPass::vectorizeStores(ArrayRef<StoreInst *> Stores,
+bool RevectorizerPass::vectorizeStores(ArrayRef<StoreInst *> Stores,
                                         BoUpSLP &R) {
   SetVector<StoreInst *> Heads;
   SmallDenseSet<StoreInst *> Tails;
@@ -4698,7 +4698,7 @@ bool SLPVectorizerPass::vectorizeStores(ArrayRef<StoreInst *> Stores,
   return Changed;
 }
 
-void SLPVectorizerPass::collectSeedInstructions(BasicBlock *BB) {
+void RevectorizerPass::collectSeedInstructions(BasicBlock *BB) {
   // Initialize the collections. We will make a single pass over the block.
   Stores.clear();
   GEPs.clear();
@@ -4733,19 +4733,19 @@ void SLPVectorizerPass::collectSeedInstructions(BasicBlock *BB) {
   }
 }
 
-bool SLPVectorizerPass::tryToVectorizePair(Value *A, Value *B, BoUpSLP &R) {
+bool RevectorizerPass::tryToVectorizePair(Value *A, Value *B, BoUpSLP &R) {
   if (!A || !B)
     return false;
   Value *VL[] = { A, B };
   return tryToVectorizeList(VL, R, /*UserCost=*/0, true);
 }
 
-bool SLPVectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
+bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
                                            int UserCost, bool AllowReorder) {
   if (VL.size() < 2)
     return false;
 
-  DEBUG(dbgs() << "SLP: Trying to vectorize a list of length = " << VL.size()
+  DEBUG(dbgs() << "Revec: Trying to vectorize a list of length = " << VL.size()
                << ".\n");
 
   // Check that all of the parts are scalar instructions of the same type.
@@ -4831,7 +4831,7 @@ bool SLPVectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
       if (hasValueBeenRAUWed(VL, TrackValues, I, OpsWidth))
         continue;
 
-      DEBUG(dbgs() << "SLP: Analyzing " << OpsWidth << " operations "
+      DEBUG(dbgs() << "Revec: Analyzing " << OpsWidth << " operations "
                    << "\n");
       ArrayRef<Value *> Ops = VL.slice(I, OpsWidth);
 
@@ -4855,10 +4855,10 @@ bool SLPVectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
       MinCost = std::min(MinCost, Cost);
 
       if (Cost < -SLPCostThreshold) {
-        DEBUG(dbgs() << "SLP: Vectorizing list at cost:" << Cost << ".\n");
+        DEBUG(dbgs() << "Revec: Vectorizing list at cost:" << Cost << ".\n");
         R.getORE()->emit(OptimizationRemark(SV_NAME, "VectorizedList",
                                                     cast<Instruction>(Ops[0]))
-                                 << "SLP vectorized with cost " << ore::NV("Cost", Cost)
+                                 << "Revec vectorized with cost " << ore::NV("Cost", Cost)
                                  << " and with tree size "
                                  << ore::NV("TreeSize", R.getTreeSize()));
 
@@ -4890,7 +4890,7 @@ bool SLPVectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
   return Changed;
 }
 
-bool SLPVectorizerPass::tryToVectorize(Instruction *I, BoUpSLP &R) {
+bool RevectorizerPass::tryToVectorize(Instruction *I, BoUpSLP &R) {
   if (!I)
     return false;
 
@@ -5607,7 +5607,7 @@ public:
           break;
       }
 
-      DEBUG(dbgs() << "SLP: Vectorizing horizontal reduction at cost:" << Cost
+      DEBUG(dbgs() << "Revec: Vectorizing horizontal reduction at cost:" << Cost
                    << ". (HorRdx)\n");
       V.getORE()->emit([&]() {
           return OptimizationRemark(
@@ -5729,7 +5729,7 @@ private:
     }
     ScalarReduxCost *= (ReduxWidth - 1);
 
-    DEBUG(dbgs() << "SLP: Adding cost " << VecReduxCost - ScalarReduxCost
+    DEBUG(dbgs() << "Revec: Adding cost " << VecReduxCost - ScalarReduxCost
                  << " for reduction that starts with " << *FirstReducedVal
                  << " (It is a "
                  << (IsPairwiseReduction ? "pairwise" : "splitting")
@@ -5971,7 +5971,7 @@ static bool tryToVectorizeHorReductionOrInstOperands(
   return Res;
 }
 
-bool SLPVectorizerPass::vectorizeRootInstruction(PHINode *P, Value *V,
+bool RevectorizerPass::vectorizeRootInstruction(PHINode *P, Value *V,
                                                  BasicBlock *BB, BoUpSLP &R,
                                                  TargetTransformInfo *TTI) {
   if (!V)
@@ -5990,7 +5990,7 @@ bool SLPVectorizerPass::vectorizeRootInstruction(PHINode *P, Value *V,
                                                   ExtraVectorization);
 }
 
-bool SLPVectorizerPass::vectorizeInsertValueInst(InsertValueInst *IVI,
+bool RevectorizerPass::vectorizeInsertValueInst(InsertValueInst *IVI,
                                                  BasicBlock *BB, BoUpSLP &R) {
   const DataLayout &DL = BB->getModule()->getDataLayout();
   if (!R.canMapToVector(IVI->getType(), DL))
@@ -6000,13 +6000,13 @@ bool SLPVectorizerPass::vectorizeInsertValueInst(InsertValueInst *IVI,
   if (!findBuildAggregate(IVI, BuildVectorOpds))
     return false;
 
-  DEBUG(dbgs() << "SLP: array mappable to vector: " << *IVI << "\n");
+  DEBUG(dbgs() << "Revec: array mappable to vector: " << *IVI << "\n");
   // Aggregate value is unlikely to be processed in vector register, we need to
   // extract scalars into scalar registers, so NeedExtraction is set true.
   return tryToVectorizeList(BuildVectorOpds, R);
 }
 
-bool SLPVectorizerPass::vectorizeInsertElementInst(InsertElementInst *IEI,
+bool RevectorizerPass::vectorizeInsertElementInst(InsertElementInst *IEI,
                                                    BasicBlock *BB, BoUpSLP &R) {
   int UserCost;
   SmallVector<Value *, 16> BuildVectorOpds;
@@ -6021,7 +6021,7 @@ bool SLPVectorizerPass::vectorizeInsertElementInst(InsertElementInst *IEI,
   return tryToVectorizeList(BuildVectorOpds, R, UserCost);
 }
 
-bool SLPVectorizerPass::vectorizeCmpInst(CmpInst *CI, BasicBlock *BB,
+bool RevectorizerPass::vectorizeCmpInst(CmpInst *CI, BasicBlock *BB,
                                          BoUpSLP &R) {
   if (tryToVectorizePair(CI->getOperand(0), CI->getOperand(1), R))
     return true;
@@ -6034,7 +6034,7 @@ bool SLPVectorizerPass::vectorizeCmpInst(CmpInst *CI, BasicBlock *BB,
   return OpsChanged;
 }
 
-bool SLPVectorizerPass::vectorizeSimpleInstructions(
+bool RevectorizerPass::vectorizeSimpleInstructions(
     SmallVectorImpl<WeakVH> &Instructions, BasicBlock *BB, BoUpSLP &R) {
   bool OpsChanged = false;
   for (auto &VH : reverse(Instructions)) {
@@ -6052,7 +6052,7 @@ bool SLPVectorizerPass::vectorizeSimpleInstructions(
   return OpsChanged;
 }
 
-bool SLPVectorizerPass::vectorizeChainsInBlock(BasicBlock *BB, BoUpSLP &R) {
+bool RevectorizerPass::vectorizeChainsInBlock(BasicBlock *BB, BoUpSLP &R) {
   bool Changed = false;
   SmallVector<Value *, 4> Incoming;
   SmallSet<Value *, 16> VisitedInstrs;
@@ -6090,7 +6090,7 @@ bool SLPVectorizerPass::vectorizeChainsInBlock(BasicBlock *BB, BoUpSLP &R) {
 
       // Try to vectorize them.
       unsigned NumElts = (SameTypeIt - IncIt);
-      DEBUG(errs() << "SLP: Trying to vectorize starting at PHIs (" << NumElts << ")\n");
+      DEBUG(errs() << "Revec: Trying to vectorize starting at PHIs (" << NumElts << ")\n");
       // The order in which the phi nodes appear in the program does not matter.
       // So allow tryToVectorizeList to reorder them if it is beneficial. This
       // is done when there are exactly two elements since tryToVectorizeList
@@ -6183,7 +6183,7 @@ bool SLPVectorizerPass::vectorizeChainsInBlock(BasicBlock *BB, BoUpSLP &R) {
   return Changed;
 }
 
-bool SLPVectorizerPass::vectorizeGEPIndices(BasicBlock *BB, BoUpSLP &R) {
+bool RevectorizerPass::vectorizeGEPIndices(BasicBlock *BB, BoUpSLP &R) {
   auto Changed = false;
   for (auto &Entry : GEPs) {
     // If the getelementptr list has fewer than two elements, there's nothing
@@ -6191,7 +6191,7 @@ bool SLPVectorizerPass::vectorizeGEPIndices(BasicBlock *BB, BoUpSLP &R) {
     if (Entry.second.size() < 2)
       continue;
 
-    DEBUG(dbgs() << "SLP: Analyzing a getelementptr list of length "
+    DEBUG(dbgs() << "Revec: Analyzing a getelementptr list of length "
                  << Entry.second.size() << ".\n");
 
     // We process the getelementptr list in chunks of 16 (like we do for
@@ -6266,7 +6266,7 @@ bool SLPVectorizerPass::vectorizeGEPIndices(BasicBlock *BB, BoUpSLP &R) {
   return Changed;
 }
 
-bool SLPVectorizerPass::vectorizeStoreChains(BoUpSLP &R) {
+bool RevectorizerPass::vectorizeStoreChains(BoUpSLP &R) {
   bool Changed = false;
   // Attempt to sort and vectorize each of the store-groups.
   for (StoreListMap::iterator it = Stores.begin(), e = Stores.end(); it != e;
@@ -6274,7 +6274,7 @@ bool SLPVectorizerPass::vectorizeStoreChains(BoUpSLP &R) {
     if (it->second.size() < 2)
       continue;
 
-    DEBUG(dbgs() << "SLP: Analyzing a store chain of length "
+    DEBUG(dbgs() << "Revec: Analyzing a store chain of length "
           << it->second.size() << ".\n");
 
     // Process the stores in chunks of 16.
