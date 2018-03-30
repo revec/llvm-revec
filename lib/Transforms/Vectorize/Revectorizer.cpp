@@ -107,21 +107,21 @@ using namespace revectorizer;
 STATISTIC(NumVectorInstructions, "Number of vector instructions generated");
 
 static cl::opt<int>
-    SLPCostThreshold("slp-threshold", cl::init(0), cl::Hidden,
+    RevecCostThreshold("revec-threshold", cl::init(0), cl::Hidden,
                      cl::desc("Only vectorize if you gain more than this "
                               "number "));
 
 static cl::opt<bool>
-ShouldVectorizeHor("slp-vectorize-hor", cl::init(true), cl::Hidden,
+ShouldVectorizeHor("revec-vectorize-hor", cl::init(true), cl::Hidden,
                    cl::desc("Attempt to vectorize horizontal reductions"));
 
 static cl::opt<bool> ShouldStartVectorizeHorAtStore(
-    "slp-vectorize-hor-store", cl::init(false), cl::Hidden,
+    "revec-vectorize-hor-store", cl::init(false), cl::Hidden,
     cl::desc(
         "Attempt to vectorize horizontal reductions feeding into a store"));
 
 static cl::opt<int>
-MaxVectorRegSizeOption("slp-max-reg-size", cl::init(128), cl::Hidden,
+MaxVectorRegSizeOption("revec-max-reg-size", cl::init(128), cl::Hidden,
     cl::desc("Attempt to vectorize for this register size in bits"));
 
 /// Limits the size of scheduling regions in a block.
@@ -129,23 +129,23 @@ MaxVectorRegSizeOption("slp-max-reg-size", cl::init(128), cl::Hidden,
 /// instructions are spread over a wide range.
 /// This limit is way higher than needed by real-world functions.
 static cl::opt<int>
-ScheduleRegionSizeBudget("slp-schedule-budget", cl::init(100000), cl::Hidden,
+ScheduleRegionSizeBudget("revec-schedule-budget", cl::init(100000), cl::Hidden,
     cl::desc("Limit the size of the SLP scheduling region per block"));
 
 static cl::opt<int> MinVectorRegSizeOption(
-    "slp-min-reg-size", cl::init(128), cl::Hidden,
+    "revec-min-reg-size", cl::init(128), cl::Hidden,
     cl::desc("Attempt to vectorize for this register size in bits"));
 
 static cl::opt<unsigned> RecursionMaxDepth(
-    "slp-recursion-max-depth", cl::init(12), cl::Hidden,
+    "revec-recursion-max-depth", cl::init(12), cl::Hidden,
     cl::desc("Limit the recursion depth when building a vectorizable tree"));
 
 static cl::opt<unsigned> MinTreeSize(
-    "slp-min-tree-size", cl::init(3), cl::Hidden,
+    "revec-min-tree-size", cl::init(3), cl::Hidden,
     cl::desc("Only vectorize small trees if they are fully vectorizable"));
 
 static cl::opt<bool>
-    ViewSLPTree("view-slp-tree", cl::Hidden,
+    ViewSLPTree("view-revec-tree", cl::Hidden,
                 cl::desc("Display the SLP trees with Graphviz"));
 
 // Limit the number of alias checks. The limit is chosen so that
@@ -161,16 +161,9 @@ static const unsigned MaxMemDepDistance = 160;
 /// regions to be handled.
 static const int MinScheduleRegionSize = 16;
 
-/// \brief Predicate for the element types that the SLP vectorizer supports.
-///
-/// The most important thing to filter here are types which are invalid in LLVM
-/// vectors. We also filter target specific types which have absolutely no
-/// meaningful vectorization path such as x86_fp80 and ppc_f128. This just
-/// avoids spending time checking the cost model and realizing that they will
-/// be inevitably scalarized.
+/// \brief Predicate for the element types that the SLP revectorizer supports.
 static bool isValidElementType(Type *Ty) {
-  return VectorType::isValidElementType(Ty) && !Ty->isX86_FP80Ty() &&
-         !Ty->isPPC_FP128Ty();
+  return Ty->isVectorTy();
 }
 
 /// \returns true if all of the instructions in \p VL are in the same block or
@@ -557,6 +550,10 @@ public:
   /// ExternallyUsedValues. Values in this MapVector can be replaced but the
   /// generated extractvalue instructions.
   Value *vectorizeTree(ExtraValueToDebugLocsMap &ExternallyUsedValues);
+
+  bool isNarrowVectorType(const Type *T) const {
+    return T->getPrimitiveSizeInBits() < MaxVecRegSize;
+  }
 
   /// \returns the cost incurred by unwanted spills and fills, caused by
   /// holding live values over call sites.
@@ -1930,7 +1927,7 @@ unsigned BoUpSLP::canMapToVector(Type *T, const DataLayout &DL) const {
     N = cast<ArrayType>(T)->getNumElements();
     EltTy = cast<ArrayType>(T)->getElementType();
   }
-  if (!isValidElementType(EltTy))
+  if (!isValidElementType(EltTy) || !isNarrowVectorType(T))
     return 0;
   uint64_t VTSize = DL.getTypeStoreSizeInBits(VectorType::get(EltTy, N));
   if (VTSize < MinVecRegSize || VTSize > MaxVecRegSize || VTSize != DL.getTypeStoreSizeInBits(T))
@@ -4521,7 +4518,7 @@ bool RevectorizerPass::runImpl(Function &F, ScalarEvolution *SE_,
 
   // Scan the blocks in the function in post order.
   for (auto BB : post_order(&F.getEntryBlock())) {
-    collectSeedInstructions(BB);
+    collectSeedInstructions(BB, R);
 
     // Vectorize trees that end at stores.
     if (!Stores.empty()) {
@@ -4599,7 +4596,7 @@ bool RevectorizerPass::vectorizeStoreChain(ArrayRef<Value *> Chain, BoUpSLP &R,
     int Cost = R.getTreeCost();
 
     DEBUG(dbgs() << "Revec: Found cost=" << Cost << " for VF=" << VF << "\n");
-    if (Cost < -SLPCostThreshold) {
+    if (Cost < -RevecCostThreshold) {
       DEBUG(dbgs() << "Revec: Decided to vectorize cost=" << Cost << "\n");
 
       using namespace ore;
@@ -4698,7 +4695,7 @@ bool RevectorizerPass::vectorizeStores(ArrayRef<StoreInst *> Stores,
   return Changed;
 }
 
-void RevectorizerPass::collectSeedInstructions(BasicBlock *BB) {
+void RevectorizerPass::collectSeedInstructions(BasicBlock *BB, BoUpSLP &R) {
   // Initialize the collections. We will make a single pass over the block.
   Stores.clear();
   GEPs.clear();
@@ -4712,8 +4709,11 @@ void RevectorizerPass::collectSeedInstructions(BasicBlock *BB) {
     if (auto *SI = dyn_cast<StoreInst>(&I)) {
       if (!SI->isSimple())
         continue;
-      if (!isValidElementType(SI->getValueOperand()->getType()))
+      Type *valueTy = SI->getValueOperand()->getType();
+      if (!(isValidElementType(valueTy) &&
+            R.isNarrowVectorType(valueTy))) {
         continue;
+      }
       Stores[GetUnderlyingObject(SI->getPointerOperand(), *DL)].push_back(SI);
     }
 
@@ -4724,7 +4724,8 @@ void RevectorizerPass::collectSeedInstructions(BasicBlock *BB) {
       auto Idx = GEP->idx_begin()->get();
       if (GEP->getNumIndices() > 1 || isa<Constant>(Idx))
         continue;
-      if (!isValidElementType(Idx->getType()))
+      if (!(isValidElementType(Idx->getType()) &&
+            R.isNarrowVectorType(Idx->getType())))
         continue;
       if (GEP->getType()->isVectorTy())
         continue;
@@ -4762,7 +4763,7 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
      R.getORE()->emit([&]() {
          return OptimizationRemarkMissed(
                     SV_NAME, "SmallVF", I0)
-                << "Cannot SLP vectorize list: vectorization factor "
+                << "Cannot revectorize list: vectorization factor "
                 << "less than 2 is not supported";
      });
      return false;
@@ -4778,7 +4779,7 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
           Ty->print(rso);
           return OptimizationRemarkMissed(
                      SV_NAME, "UnsupportedType", I0)
-                 << "Cannot SLP vectorize list: type "
+                 << "Cannot revectorize list: type "
                  << rso.str() + " is unsupported by vectorizer";
       });
       return false;
@@ -4802,7 +4803,7 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
 
   bool Changed = false;
   bool CandidateFound = false;
-  int MinCost = SLPCostThreshold;
+  int MinCost = RevecCostThreshold;
 
   // Keep track of values that were deleted by vectorizing in the loop below.
   SmallVector<WeakTrackingVH, 8> TrackValues(VL.begin(), VL.end());
@@ -4854,7 +4855,7 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
       CandidateFound = true;
       MinCost = std::min(MinCost, Cost);
 
-      if (Cost < -SLPCostThreshold) {
+      if (Cost < -RevecCostThreshold) {
         DEBUG(dbgs() << "Revec: Vectorizing list at cost:" << Cost << ".\n");
         R.getORE()->emit(OptimizationRemark(SV_NAME, "VectorizedList",
                                                     cast<Instruction>(Ops[0]))
@@ -4877,7 +4878,7 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
                    SV_NAME, "NotBeneficial",  I0)
                << "List vectorization was possible but not beneficial with cost "
                << ore::NV("Cost", MinCost) << " >= "
-               << ore::NV("Treshold", -SLPCostThreshold);
+               << ore::NV("Treshold", -RevecCostThreshold);
     });
   } else if (!Changed) {
     R.getORE()->emit([&]() {
@@ -5595,14 +5596,14 @@ public:
       // Estimate cost.
       int Cost =
           V.getTreeCost() + getReductionCost(TTI, ReducedVals[i], ReduxWidth);
-      if (Cost >= -SLPCostThreshold) {
+      if (Cost >= -RevecCostThreshold) {
           V.getORE()->emit([&]() {
               return OptimizationRemarkMissed(
                          SV_NAME, "HorSLPNotBeneficial", cast<Instruction>(VL[0]))
                      << "Vectorizing horizontal reduction is possible"
                      << "but not beneficial with cost "
                      << ore::NV("Cost", Cost) << " and threshold "
-                     << ore::NV("Threshold", -SLPCostThreshold);
+                     << ore::NV("Threshold", -RevecCostThreshold);
           });
           break;
       }

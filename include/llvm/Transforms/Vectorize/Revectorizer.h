@@ -90,7 +90,7 @@ private:
   ///
   /// TODO: We can further reduce this cost if we flush the chain creation
   ///       every time we run into a memory barrier.
-  void collectSeedInstructions(BasicBlock *BB);
+  void collectSeedInstructions(BasicBlock *BB, revectorizer::BoUpSLP &R);
 
   /// \brief Try to vectorize a chain that starts at two arithmetic instrs.
   bool tryToVectorizePair(Value *A, Value *B, revectorizer::BoUpSLP &R);
