@@ -166,6 +166,17 @@ static bool isValidElementType(Type *Ty) {
   return Ty->isVectorTy();
 }
 
+static VectorType *getVectorType(Type *ElementTy, unsigned numElements) {
+  // Get the new vector type, if elements are vectors
+  if (VectorType *VecElementTy = dyn_cast<VectorType>(ElementTy)) {
+    return VectorType::get(VecElementTy->getElementType(),
+												   VecElementTy->getNumElements() * numElements);
+  }
+
+  // Else, elements are scalars: get the combined vector type
+  return VectorType::get(ElementTy, numElements);
+}
+
 /// \returns true if all of the instructions in \p VL are in the same block or
 /// false otherwise.
 static bool allSameBlock(ArrayRef<Value *> VL) {
@@ -612,6 +623,9 @@ public:
   /// vectorization factors.
   unsigned getVectorElementSize(Value *V);
 
+  // \return The total width in bits of elements in a vector type
+  unsigned getVectorSize(Value *V);
+
   /// Compute the minimum type sizes required to represent the entries in a
   /// vectorizable tree.
   void computeMinimumValueSizes();
@@ -706,6 +720,11 @@ private:
     /// A vector of scalars.
     ValueList Scalars;
 
+#if 0
+    // A vector of vector elements.
+    ValueList Vectors;
+#endif
+
     /// The Scalars are vectorized into this value. It is initialized to Null.
     Value *VectorizedValue = nullptr;
 
@@ -734,10 +753,22 @@ private:
     VectorizableTree.emplace_back(VectorizableTree);
     int idx = VectorizableTree.size() - 1;
     TreeEntry *Last = &VectorizableTree[idx];
+
+#if 0
+    Type *ElementTy = VL[0]->getType();
+    if (dyn_cast<VectorType>(ElementTy)) {
+      Last->Vectors.insert(Last->Scalars.begin(), VL.begin(), VL.end());  
+    } else {
+      Last->Scalars.insert(Last->Scalars.begin(), VL.begin(), VL.end());
+    }
+#else
     Last->Scalars.insert(Last->Scalars.begin(), VL.begin(), VL.end());
+#endif
+
     Last->NeedToGather = !Vectorized;
     Last->ReuseShuffleIndices.append(ReuseShuffleIndices.begin(),
                                      ReuseShuffleIndices.end());
+
     if (Vectorized) {
       for (int i = 0, e = VL.size(); i != e; ++i) {
         assert(!getTreeEntry(VL[i]) && "Scalar already in tree!");
@@ -1396,16 +1427,9 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
     return;
   }
 
-  // Don't handle vectors.
-  if (S.OpValue->getType()->isVectorTy()) {
-    DEBUG(dbgs() << "Revec: Gathering due to vector type.\n");
-    newTreeEntry(VL, false, UserTreeIdx);
-    return;
-  }
-
   if (StoreInst *SI = dyn_cast<StoreInst>(S.OpValue))
-    if (SI->getValueOperand()->getType()->isVectorTy()) {
-      DEBUG(dbgs() << "Revec: Gathering due to store vector type.\n");
+    if (!SI->getValueOperand()->getType()->isVectorTy()) {
+      DEBUG(dbgs() << "Revec: Gathering due to non-vector store value type.\n");
       newTreeEntry(VL, false, UserTreeIdx);
       return;
     }
@@ -1990,13 +2014,19 @@ bool BoUpSLP::areAllUsersVectorized(Instruction *I) const {
 int BoUpSLP::getEntryCost(TreeEntry *E) {
   ArrayRef<Value*> VL = E->Scalars;
 
-  Type *ScalarTy = VL[0]->getType();
+  Type *ElementTy = VL[0]->getType();
   if (StoreInst *SI = dyn_cast<StoreInst>(VL[0]))
-    ScalarTy = SI->getValueOperand()->getType();
+    ElementTy = SI->getValueOperand()->getType();
   else if (CmpInst *CI = dyn_cast<CmpInst>(VL[0]))
-    ScalarTy = CI->getOperand(0)->getType();
-  VectorType *VecTy = VectorType::get(ScalarTy, VL.size());
+    ElementTy = CI->getOperand(0)->getType();
 
+  VectorType *VecTy = getVectorType(ElementTy, VL.size());
+  Type *ScalarTy = VecTy->getElementType();
+
+  // TODO: Update cost model to handle vector VL
+#if 1
+  return -1;
+#else
   // If we have computed a smaller type for the expression, update VecTy so
   // that the costs will be accurate.
   if (MinBWs.count(VL[0]))
@@ -2339,6 +2369,7 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
     default:
       llvm_unreachable("Unknown instruction");
   }
+#endif
 }
 
 bool BoUpSLP::isFullyVectorizableTinyTree() {
@@ -2951,10 +2982,22 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
 
   InstructionsState S = getSameOpcode(E->Scalars);
   Instruction *VL0 = cast<Instruction>(E->Scalars[0]);
-  Type *ScalarTy = VL0->getType();
+  Type *ElementTy = VL0->getType();
   if (StoreInst *SI = dyn_cast<StoreInst>(VL0))
-    ScalarTy = SI->getValueOperand()->getType();
-  VectorType *VecTy = VectorType::get(ScalarTy, E->Scalars.size());
+    ElementTy = SI->getValueOperand()->getType();
+
+  VectorType *VecTy = getVectorType(ElementTy, E->Scalars.size());
+  // Type *ScalarTy = VecTy->getElementType();
+
+	DEBUG(dbgs() << "Revec: vectorizing bundle : \n");
+	DEBUG(
+		for(unsigned i = 0; i< E->Scalars.size(); i++){
+			dbgs() << "  ";
+			E->Scalars[i]->print(dbgs());
+			dbgs() << "\n";
+		}
+	);
+	DEBUG(dbgs() << "  Revec: Need to gather: " << E->NeedToGather << "\n");
 
   bool NeedToShuffleReuses = !E->ReuseShuffleIndices.empty();
 
@@ -4126,6 +4169,16 @@ void BoUpSLP::scheduleBlock(BlockScheduling *BS) {
   BS->ScheduleStart = nullptr;
 }
 
+unsigned BoUpSLP::getVectorSize(Value *V) {
+  // If V is a store, just return the width of the stored value without
+  // traversing the expression tree. This is the common case.
+  if (auto *Store = dyn_cast<StoreInst>(V))
+    return DL->getTypeSizeInBits(Store->getValueOperand()->getType());
+
+  // TODO: In which cases is the value not a store?
+  return 0u;
+}
+
 unsigned BoUpSLP::getVectorElementSize(Value *V) {
   // If V is a store, just return the width of the stored value without
   // traversing the expression tree. This is the common case.
@@ -4566,6 +4619,8 @@ bool RevectorizerPass::vectorizeStoreChain(ArrayRef<Value *> Chain, BoUpSLP &R,
   const unsigned ChainLen = Chain.size();
   DEBUG(dbgs() << "Revec: Analyzing a store chain of length " << ChainLen
         << "\n");
+  // TODO: getVectorElementSize checks that the value is not of a vector type.
+  //       Switch to getVectorSize (equivalent for now)
   const unsigned Sz = R.getVectorElementSize(Chain[0]);
   const unsigned VF = VecRegSize / Sz;
 
