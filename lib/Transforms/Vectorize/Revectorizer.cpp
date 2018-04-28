@@ -17,7 +17,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/Transforms/Vectorize/Revectorizer.h"
+#include "llvm/Transforms/Vectorize/Revectorizer/Revectorizer.h"
+#include "llvm/Transforms/Vectorize/Revectorizer/IntrinsicConversion.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -145,7 +146,7 @@ static cl::opt<unsigned> MinTreeSize(
     cl::desc("Only vectorize small trees if they are fully vectorizable"));
 
 static cl::opt<bool>
-    ViewSLPTree("view-revec-tree", cl::Hidden,
+    ViewRevecTree("view-revec-tree", cl::Hidden,
                 cl::desc("Display the SLP trees with Graphviz"));
 
 // Limit the number of alias checks. The limit is chosen so that
@@ -1128,7 +1129,14 @@ private:
     void initialFillReadyList(ReadyListType &ReadyList) {
       for (auto *I = ScheduleStart; I != ScheduleEnd; I = I->getNextNode()) {
         doForAllOpcodes(I, [&](ScheduleData *SD) {
-          if (SD->isSchedulingEntity() && SD->isReady()) {
+          DEBUG(dbgs() << "Revec:    ScheduleData: " << *SD << " Instr: " << *I
+                       << "\n\tSD: " << SD
+                       << "\n\tSD FirstInBundle: " << SD->FirstInBundle
+                       << "\n\tSD UnscheduledDeps: " << SD->UnscheduledDeps
+                       << "\n\tSD UnscheduledDepsInBundle: " << SD->UnscheduledDepsInBundle << "\n");
+          // TODO: Need to put back in pickedSD->isReady(), but no ScheduleData bundle is ready on a test...
+          // if (SD->isSchedulingEntity() && SD->isReady()) {
+          if (SD->isSchedulingEntity()) {
             ReadyList.insert(SD);
             DEBUG(dbgs() << "Revec:    initially in ready list: " << *I << "\n");
           }
@@ -1355,6 +1363,8 @@ void BoUpSLP::buildTree(ArrayRef<Value *> Roots,
   UserIgnoreList = UserIgnoreLst;
   if (!allSameType(Roots))
     return;
+  // TODO: Refactor, move this to pass initialization
+  initializeIntrinsicWideningMap();
   buildTree_rec(Roots, 0, -1);
 
   // Collect the values that we need to extract from the tree.
@@ -1839,6 +1849,30 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
     case Instruction::Call: {
       // Check if the calls are all to the same vectorizable intrinsic.
       CallInst *CI = cast<CallInst>(VL0);
+      Function *Int = CI->getCalledFunction();
+
+      if (Int->isIntrinsic()) {
+        Intrinsic::ID id = Int->getIntrinsicID();
+        DEBUG(dbgs() << "Revec: Found intrinsic function " << llvm::Intrinsic::getName(id) << "\n");
+
+        // Find intrinsic conversion and merge factor
+        if (intrinsicWideningMap.count(static_cast<unsigned>(id))) {
+          const auto& altPair = intrinsicWideningMap[id];
+          Intrinsic::ID alt = static_cast<Intrinsic::ID>(altPair.first);
+          int fuseWidth = altPair.second;
+
+          DEBUG(dbgs() << "Revec:   possible conversion: " << llvm::Intrinsic::getName(alt)
+                   << " widening factor: " << fuseWidth << ".\n");
+        } else {
+          DEBUG(dbgs() << "Revec:   no conversion found. Key: " << static_cast<unsigned>(id) << "\n");
+          DEBUG(dbgs() << "Revec:     call: " << *CI << "\n");
+
+          for (const auto& item : intrinsicWideningMap) {
+            DEBUG(dbgs() << "Revec: " << item.first << " => (" << item.second.first << ", " << item.second.second << ")\n");
+          }
+        }
+      }
+
       // Check if this is an Intrinsic call or something that can be
       // represented by an intrinsic call
       Intrinsic::ID ID = getVectorIntrinsicIDForCall(CI, TLI);
@@ -1848,7 +1882,6 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
         DEBUG(dbgs() << "Revec: Non-vectorizable call.\n");
         return;
       }
-      Function *Int = CI->getCalledFunction();
       Value *A1I = nullptr;
       if (hasVectorInstrinsicScalarOpd(ID, 1))
         A1I = CI->getArgOperand(1);
@@ -2556,8 +2589,8 @@ int BoUpSLP::getTreeCost() {
   }
   DEBUG(dbgs() << Str);
 
-  if (ViewSLPTree)
-    ViewGraph(this, "SLP" + F->getName(), false, Str);
+  if (ViewRevecTree)
+    ViewGraph(this, "Revec" + F->getName(), false, Str);
 
   return Cost;
 }
@@ -3807,7 +3840,9 @@ bool BoUpSLP::BlockScheduling::tryScheduleBundle(ArrayRef<Value *> VL,
     ScheduleData *pickedSD = ReadyInsts.back();
     ReadyInsts.pop_back();
 
-    if (pickedSD->isSchedulingEntity() && pickedSD->isReady()) {
+    // TODO: Need to put back in pickedSD->isReady(), but no ScheduleData bundle is ready on a test...
+    // if (pickedSD->isSchedulingEntity() && pickedSD->isReady()) {
+    if (pickedSD->isSchedulingEntity()) {
       schedule(pickedSD, ReadyInsts);
     }
   }
@@ -6357,6 +6392,7 @@ INITIALIZE_PASS_DEPENDENCY(ScalarEvolutionWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(LoopSimplify)
 INITIALIZE_PASS_DEPENDENCY(DemandedBitsWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(OptimizationRemarkEmitterWrapperPass)
+// INITIALIZE_PASS_DEPENDENCY(SLPVectorizer)
 INITIALIZE_PASS_END(Revectorizer, SV_NAME, lv_name, false, false)
 
 Pass *llvm::createRevectorizerPass() { return new Revectorizer(); }
