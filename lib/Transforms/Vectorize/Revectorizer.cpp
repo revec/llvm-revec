@@ -1135,8 +1135,8 @@ private:
                        << "\n\tSD UnscheduledDeps: " << SD->UnscheduledDeps
                        << "\n\tSD UnscheduledDepsInBundle: " << SD->UnscheduledDepsInBundle << "\n");
           // TODO: Need to put back in pickedSD->isReady(), but no ScheduleData bundle is ready on a test...
-          // if (SD->isSchedulingEntity() && SD->isReady()) {
-          if (SD->isSchedulingEntity()) {
+          if (SD->isSchedulingEntity() && SD->isReady()) {
+          // if (SD->isSchedulingEntity()) {
             ReadyList.insert(SD);
             DEBUG(dbgs() << "Revec:    initially in ready list: " << *I << "\n");
           }
@@ -1863,16 +1863,36 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
 
           DEBUG(dbgs() << "Revec:   possible conversion: " << llvm::Intrinsic::getName(alt)
                    << " widening factor: " << fuseWidth << ".\n");
+
+          newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndicies);
+
+          for (unsigned i = 0, e = CI->getNumArgOperands(); i != e; ++i) {
+            ValueList Operands;
+            // Prepare the operand vector.
+            for (Value *val : VL) {
+              CallInst *CI2 = dyn_cast<CallInst>(val);
+              Operands.push_back(CI2->getArgOperand(i));
+            }
+            buildTree_rec(Operands, Depth + 1, UserTreeIdx);
+          }
+
+          return;
         } else {
           DEBUG(dbgs() << "Revec:   no conversion found. Key: " << static_cast<unsigned>(id) << "\n");
           DEBUG(dbgs() << "Revec:     call: " << *CI << "\n");
 
-          for (const auto& item : intrinsicWideningMap) {
-            DEBUG(dbgs() << "Revec: " << item.first << " => (" << item.second.first << ", " << item.second.second << ")\n");
-          }
+          // for (const auto& item : intrinsicWideningMap) {
+          //   DEBUG(dbgs() << "Revec: " << item.first << " => (" << item.second.first << ", " << item.second.second << ")\n");
+          // }
         }
       }
 
+      // Found a non-intrinsic call - cancel scheduling this tree
+      BS.cancelScheduling(VL, VL0);
+      newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
+      return;
+
+#if 0
       // Check if this is an Intrinsic call or something that can be
       // represented by an intrinsic call
       Intrinsic::ID ID = getVectorIntrinsicIDForCall(CI, TLI);
@@ -1933,6 +1953,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
         buildTree_rec(Operands, Depth + 1, UserTreeIdx);
       }
       return;
+#endif
     }
     case Instruction::ShuffleVector:
       // If this is not an alternate sequence of opcode like add-sub
@@ -2497,8 +2518,15 @@ int BoUpSLP::getSpillCost() {
 
       if (isa<CallInst>(&*PrevInstIt) && &*PrevInstIt != PrevInst) {
         SmallVector<Type*, 4> V;
-        for (auto *II : LiveValues)
-          V.push_back(VectorType::get(II->getType(), BundleWidth));
+        for (auto *II : LiveValues) {
+          // Widen II's type by factor BundleWidth
+          auto *vectorElTy = II->getType();
+          auto *elTy = vectorElTy->getVectorElementType();
+          unsigned TotalBundleWidth = vectorElTy->getVectorNumElements() * BundleWidth;
+
+          assert(elTy && "Trying to fuse scalars");
+          V.push_back(VectorType::get(elTy, TotalBundleWidth));
+        }
         Cost += TTI->getCostOfKeepingLiveOverCall(V);
       }
 
@@ -3416,6 +3444,58 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       if (CI && (FI = CI->getCalledFunction())) {
         IID = FI->getIntrinsicID();
       }
+
+      assert(IID != Intrinsic::not_intrinsic);
+
+      //if (IID != Intrinsic::not_intrinsic) {
+        DEBUG(dbgs() << "Revec: intrinsic function " << llvm::Intrinsic::getName(IID) << "\n");
+
+        assert(intrinsicWideningMap.count(static_cast<unsigned>(IID)));
+
+        const auto& altPair = intrinsicWideningMap[IID];
+        Intrinsic::ID alt = static_cast<Intrinsic::ID>(altPair.first);
+        int fuseWidth = altPair.second;
+
+        // Find intrinsic conversion and merge factor
+        DEBUG(dbgs() << "Revec:   translation: " << llvm::Intrinsic::getName(alt)
+                     << " widening factor: " << fuseWidth << ".\n");
+
+        ValueList args;
+        for (unsigned i = 0, e = CI->getNumArgOperands(); i != e; ++i) {
+          ValueList Operands;
+          // Prepare the operand vector.
+          for (Value *val : E->Scalars) {
+            CallInst *CI2 = dyn_cast<CallInst>(val);
+            Operands.push_back(CI2->getArgOperand(i));
+          }
+
+          Value *arg = vectorizeTree(Operands);
+          DEBUG(dbgs() << "Revec: arg " << i << " = " << *arg << "\n");
+          args.push_back(arg);
+        }
+
+
+        Module *M = F->getParent();
+        //Type *Tys[] = { VectorType::get(CI->getType(), E->Scalars.size()) };
+        Function *CF = Intrinsic::getDeclaration(M, alt);
+        SmallVector<OperandBundleDef, 1> OpBundles;
+        CI->getOperandBundlesAsDefs(OpBundles);
+        Value *V = Builder.CreateCall(CF, args, OpBundles);
+        DEBUG(dbgs() << "Revec: Call Vec value : " << *V << "\n");
+
+        // The scalar argument uses an in-tree scalar so we add the new vectorized
+        // call to ExternalUses list to make sure that an extract will be
+        // generated in the future.
+        //if (ScalarArg && ScalarToTreeEntry.count(ScalarArg))
+        //  ExternalUses.push_back(ExternalUser(ScalarArg, cast<User>(V), 0));
+
+        E->VectorizedValue = V;
+        ++NumVectorInstructions;
+        return V;
+      //}
+
+
+#if 0
       std::vector<Value *> OpVecs;
       for (int j = 0, e = CI->getNumArgOperands(); j < e; ++j) {
         ValueList OpVL;
@@ -3459,6 +3539,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       E->VectorizedValue = V;
       ++NumVectorInstructions;
       return V;
+#endif
     }
     case Instruction::ShuffleVector: {
       ValueList LHSVL, RHSVL;
@@ -3826,6 +3907,8 @@ bool BoUpSLP::BlockScheduling::tryScheduleBundle(ArrayRef<Value *> VL,
     initialFillReadyList(ReadyInsts);
   }
 
+  DEBUG(dbgs() << "Revec: ReadyList ReadyInsts size: " << ReadyInsts.size() << "\n");
+
   DEBUG(dbgs() << "Revec: try schedule bundle " << *Bundle << " in block "
                << BB->getName() << "\n");
 
@@ -3841,8 +3924,8 @@ bool BoUpSLP::BlockScheduling::tryScheduleBundle(ArrayRef<Value *> VL,
     ReadyInsts.pop_back();
 
     // TODO: Need to put back in pickedSD->isReady(), but no ScheduleData bundle is ready on a test...
-    // if (pickedSD->isSchedulingEntity() && pickedSD->isReady()) {
-    if (pickedSD->isSchedulingEntity()) {
+    if (pickedSD->isSchedulingEntity() && pickedSD->isReady()) {
+    // if (pickedSD->isSchedulingEntity()) {
       schedule(pickedSD, ReadyInsts);
     }
   }
@@ -4048,6 +4131,9 @@ void BoUpSLP::BlockScheduling::calculateDependencies(ScheduleData *SD,
               // I'm not sure if this can ever happen. But we need to be safe.
               // This lets the instruction/bundle never be scheduled and
               // eventually disable vectorization.
+
+              // TODO: remove and log
+              assert(false && "Unexpected user type - not an Instruction");
               BundleMember->Dependencies++;
               BundleMember->incrementUnscheduledDeps(1);
             }
@@ -4077,6 +4163,9 @@ void BoUpSLP::BlockScheduling::calculateDependencies(ScheduleData *SD,
                     ((SrcMayWrite || DepDest->Inst->mayWriteToMemory()) &&
                      (numAliased >= AliasedCheckLimit ||
                       SLP->isAliased(SrcLoc, SrcInst, DepDest->Inst)))) {
+
+              DEBUG(dbgs() << "Revec: aliased memory locations for instructions "
+                           << *SrcInst << ", " << *DepDest->Inst << "\n");
 
               // We increment the counter only if the locations are aliased
               // (instead of counting all alias checks). This gives a better
