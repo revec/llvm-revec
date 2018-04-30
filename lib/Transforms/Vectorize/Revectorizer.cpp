@@ -2937,21 +2937,56 @@ void BoUpSLP::setInsertPointAfterBundle(ArrayRef<Value *> VL, Value *OpValue) {
 }
 
 Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
+  // Create undefined vector to populate
   Value *Vec = UndefValue::get(Ty);
-  // Generate the 'InsertElement' instruction.
-  for (unsigned i = 0; i < Ty->getNumElements(); ++i) {
-    Vec = Builder.CreateInsertElement(Vec, VL[i], Builder.getInt32(i));
+
+  // Generate 'ExtractElement' instructions by extracting vectors
+  unsigned numExtracted = 0;
+  SmallDenseMap<Value *, ValueList> ScalarVL;
+  for (Value *elementVector : VL) {
+    // TODO: Could support inserting scalars as well
+    Type *VLTy = elementVector->getType();
+    assert(VLTy->isVectorTy() && "attempted to extend a vector with a non-vector type");
+
+    // Copy by value
+    ValueList vl;
+    ScalarVL[elementVector] = vl;
+
+    // TODO: Cancel scheduling for type mismatch or assert
+
+    for (unsigned j = 0; j < VLTy->getVectorNumElements(); ++j) {
+      Value *El = Builder.CreateExtractElement(elementVector, Builder.getInt32(j));
+      ScalarVL[elementVector].append(j, El);
+      ++numExtracted;
+    }
+  }
+
+  DEBUG(dbgs() << "Revec: Prior to gather, extracted " << numExtracted << " scalars from value list to place in vector "
+               << *Vec << " (fits " << Ty->getNumElements() << " elements)\n");
+
+  // Generate 'ExtractElement' and 'InsertElement' instructions.
+  // TODO: Find a way to insert multiple elements simultaneously
+  unsigned nextElIndex = 0;
+  for (unsigned i = 0; i < VL.size(); ++i) {
+  //for (unsigned i = 0; i < Ty->getNumElements() && i < ScalarVL.size(); ++i) {
+    Value *VectorEl = VL[i];
+
+    for (Value *ScalarEl : ScalarVL[VectorEl]) {
+      Vec = Builder.CreateInsertElement(Vec, ScalarEl, Builder.getInt32(nextElIndex));
+      ++nextElIndex;
+    }
+
     if (Instruction *Insrt = dyn_cast<Instruction>(Vec)) {
       GatherSeq.insert(Insrt);
       CSEBlocks.insert(Insrt->getParent());
 
       // Add to our 'need-to-extract' list.
-      if (TreeEntry *E = getTreeEntry(VL[i])) {
+      if (TreeEntry *E = getTreeEntry(VectorEl)) {
         // Find which lane we need to extract.
         int FoundLane = -1;
         for (unsigned Lane = 0, LE = E->Scalars.size(); Lane != LE; ++Lane) {
-          // Is this the lane of the scalar that we are looking for ?
-          if (E->Scalars[Lane] == VL[i]) {
+          // Is this the lane containing the vector that we are looking for?
+          if (E->Scalars[Lane] == VectorEl) {
             FoundLane = Lane;
             break;
           }
@@ -2959,10 +2994,10 @@ Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
         assert(FoundLane >= 0 && "Could not find the correct lane");
         if (!E->ReuseShuffleIndices.empty()) {
           FoundLane =
-              std::distance(E->ReuseShuffleIndices.begin(),
-                            llvm::find(E->ReuseShuffleIndices, FoundLane));
+                  std::distance(E->ReuseShuffleIndices.begin(),
+                                llvm::find(E->ReuseShuffleIndices, FoundLane));
         }
-        ExternalUses.push_back(ExternalUser(VL[i], Insrt, FoundLane));
+        ExternalUses.push_back(ExternalUser(VectorEl, Insrt, FoundLane));
       }
     }
   }
@@ -2996,9 +3031,9 @@ Value *BoUpSLP::vectorizeTree(ArrayRef<Value *> VL) {
     }
   }
 
-  Type *ScalarTy = S.OpValue->getType();
+  Type *OpValueTy = S.OpValue->getType();
   if (StoreInst *SI = dyn_cast<StoreInst>(S.OpValue))
-    ScalarTy = SI->getValueOperand()->getType();
+    OpValueTy = SI->getValueOperand()->getType();
 
   // Check that every instruction appears once in this bundle.
   SmallVector<unsigned, 4> ReuseShuffleIndicies;
@@ -3019,7 +3054,11 @@ Value *BoUpSLP::vectorizeTree(ArrayRef<Value *> VL) {
     else
       VL = UniqueValues;
   }
-  VectorType *VecTy = VectorType::get(ScalarTy, VL.size());
+    
+  assert(OpValueTy->isVectorTy() && "Trying to widen non-vector type");
+  VectorType *VecTy =
+          VectorType::get(OpValueTy->getVectorElementType(),
+                          OpValueTy->getVectorNumElements() * VL.size());
 
   Value *V = Gather(VL, VecTy);
   if (!ReuseShuffleIndicies.empty()) {
@@ -4993,6 +5032,7 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
     // No actual vectorization should happen, if number of parts is the same as
     // provided vectorization factor (i.e. the scalar type is used for vector
     // code during codegen).
+    // TODO: Widen VL[0]->getType() -- this will likely lead to an assertion failure as of now
     auto *VecTy = VectorType::get(VL[0]->getType(), VF);
     if (TTI->getNumberOfParts(VecTy) == VF)
       continue;
