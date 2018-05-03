@@ -2940,67 +2940,54 @@ Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
   // Create undefined vector to populate
   Value *Vec = UndefValue::get(Ty);
 
-  // Generate 'ExtractElement' instructions by extracting vectors
+  // Generate a pair of 'ExtractElement' and 'InsertElement'
+  // instructions for each scalar in each VL vector
   unsigned numExtracted = 0;
-  SmallDenseMap<Value *, ValueList> ScalarVL;
   for (Value *elementVector : VL) {
     // TODO: Could support inserting scalars as well
     Type *VLTy = elementVector->getType();
     assert(VLTy->isVectorTy() && "attempted to extend a vector with a non-vector type");
 
-    // Copy by value
-    ValueList vl;
-    ScalarVL[elementVector] = vl;
+    TreeEntry *E = getTreeEntry(elementVector);
 
-    // TODO: Cancel scheduling for type mismatch or assert
+    // TODO: Cancel scheduling or assert false for type mismatch
 
     for (unsigned j = 0; j < VLTy->getVectorNumElements(); ++j) {
-      Value *El = Builder.CreateExtractElement(elementVector, Builder.getInt32(j));
-      ScalarVL[elementVector].append(j, El);
+      Value *ScalarEl = Builder.CreateExtractElement(elementVector, Builder.getInt32(j));
+      Vec = Builder.CreateInsertElement(Vec, ScalarEl, Builder.getInt32(numExtracted));
       ++numExtracted;
-    }
-  }
 
-  DEBUG(dbgs() << "Revec: Prior to gather, extracted " << numExtracted << " scalars from value list to place in vector "
-               << *Vec << " (fits " << Ty->getNumElements() << " elements)\n");
+      if (Instruction *Insrt = dyn_cast<Instruction>(Vec)) {
+        // Record this gather/insert for later optimization
+        GatherSeq.insert(Insrt);
+        CSEBlocks.insert(Insrt->getParent());
 
-  // Generate 'ExtractElement' and 'InsertElement' instructions.
-  // TODO: Find a way to insert multiple elements simultaneously
-  unsigned nextElIndex = 0;
-  for (unsigned i = 0; i < VL.size(); ++i) {
-  //for (unsigned i = 0; i < Ty->getNumElements() && i < ScalarVL.size(); ++i) {
-    Value *VectorEl = VL[i];
-
-    for (Value *ScalarEl : ScalarVL[VectorEl]) {
-      Vec = Builder.CreateInsertElement(Vec, ScalarEl, Builder.getInt32(nextElIndex));
-      ++nextElIndex;
-    }
-
-    if (Instruction *Insrt = dyn_cast<Instruction>(Vec)) {
-      GatherSeq.insert(Insrt);
-      CSEBlocks.insert(Insrt->getParent());
-
-      // Add to our 'need-to-extract' list.
-      if (TreeEntry *E = getTreeEntry(VectorEl)) {
-        // Find which lane we need to extract.
-        int FoundLane = -1;
-        for (unsigned Lane = 0, LE = E->Scalars.size(); Lane != LE; ++Lane) {
-          // Is this the lane containing the vector that we are looking for?
-          if (E->Scalars[Lane] == VectorEl) {
-            FoundLane = Lane;
-            break;
+        // Add to our 'need-to-extract' list.
+        if (E) {
+          // Find which lane we need to extract.
+          int FoundLane = -1;
+          for (unsigned Lane = 0, LE = E->Scalars.size(); Lane != LE; ++Lane) {
+            // Is this the lane containing the vector that we are looking for?
+            if (E->Scalars[Lane] == elementVector) {
+              FoundLane = Lane;
+              break;
+            }
           }
+          assert(FoundLane >= 0 && "Could not find the correct lane");
+          if (!E->ReuseShuffleIndices.empty()) {
+            FoundLane =
+                    std::distance(E->ReuseShuffleIndices.begin(),
+                                  llvm::find(E->ReuseShuffleIndices, FoundLane));
+          }
+          ExternalUses.push_back(ExternalUser(elementVector, Insrt, FoundLane));
         }
-        assert(FoundLane >= 0 && "Could not find the correct lane");
-        if (!E->ReuseShuffleIndices.empty()) {
-          FoundLane =
-                  std::distance(E->ReuseShuffleIndices.begin(),
-                                llvm::find(E->ReuseShuffleIndices, FoundLane));
-        }
-        ExternalUses.push_back(ExternalUser(VectorEl, Insrt, FoundLane));
       }
     }
   }
+
+  DEBUG(dbgs() << "Revec: During gather, extracted and inserted" << numExtracted << " scalars to place in vector "
+               << *Vec << " (fits " << Ty->getNumElements() << " elements)\n");
+
 
   return Vec;
 }
