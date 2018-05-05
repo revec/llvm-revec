@@ -171,7 +171,7 @@ static VectorType *getVectorType(Type *ElementTy, unsigned numElements) {
   // Get the new vector type, if elements are vectors
   if (VectorType *VecElementTy = dyn_cast<VectorType>(ElementTy)) {
     return VectorType::get(VecElementTy->getElementType(),
-												   VecElementTy->getNumElements() * numElements);
+						   VecElementTy->getNumElements() * numElements);
   }
 
   // Else, elements are scalars: get the combined vector type
@@ -2007,7 +2007,7 @@ unsigned BoUpSLP::canMapToVector(Type *T, const DataLayout &DL) const {
   }
   if (!isValidElementType(EltTy) || !isNarrowVectorType(T))
     return 0;
-  uint64_t VTSize = DL.getTypeStoreSizeInBits(VectorType::get(EltTy, N));
+  uint64_t VTSize = DL.getTypeStoreSizeInBits(getVectorType(EltTy, N));
   if (VTSize < MinVecRegSize || VTSize > MaxVecRegSize || VTSize != DL.getTypeStoreSizeInBits(T))
     return 0;
   if (ST) {
@@ -2202,7 +2202,7 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       int ScalarCost = VL.size() * TTI->getCastInstrCost(VL0->getOpcode(),
                                                          VL0->getType(), SrcTy, VL0);
 
-      VectorType *SrcVecTy = VectorType::get(SrcTy, VL.size());
+      VectorType *SrcVecTy = getVectorType(SrcTy, VL.size());
       int VecCost = 0;
       // Check if the values are candidates to demote.
       if (!MinBWs.count(VL0) || VecTy != SrcVecTy) {
@@ -2525,7 +2525,7 @@ int BoUpSLP::getSpillCost() {
           unsigned TotalBundleWidth = vectorElTy->getVectorNumElements() * BundleWidth;
 
           assert(elTy && "Trying to fuse scalars");
-          V.push_back(VectorType::get(elTy, TotalBundleWidth));
+          V.push_back(getVectorType(elTy, TotalBundleWidth));
         }
         Cost += TTI->getCostOfKeepingLiveOverCall(V);
       }
@@ -2590,13 +2590,13 @@ int BoUpSLP::getTreeCost() {
     // If we plan to rewrite the tree in a smaller type, we will need to sign
     // extend the extracted value back to the original type. Here, we account
     // for the extract and the added cost of the sign extend if needed.
-    auto *VecTy = VectorType::get(EU.Scalar->getType(), BundleWidth);
+    auto *VecTy = getVectorType(EU.Scalar->getType(), BundleWidth);
     auto *ScalarRoot = VectorizableTree[0].Scalars[0];
     if (MinBWs.count(ScalarRoot)) {
       auto *MinTy = IntegerType::get(F->getContext(), MinBWs[ScalarRoot].first);
       auto Extend =
           MinBWs[ScalarRoot].second ? Instruction::SExt : Instruction::ZExt;
-      VecTy = VectorType::get(MinTy, BundleWidth);
+      VecTy = getVectorType(MinTy, BundleWidth);
       ExtractCost += TTI->getExtractWithExtendCost(Extend, EU.Scalar->getType(),
                                                    VecTy, EU.Lane);
     } else {
@@ -2639,7 +2639,7 @@ int BoUpSLP::getGatherCost(ArrayRef<Value *> VL) {
   Type *ScalarTy = VL[0]->getType();
   if (StoreInst *SI = dyn_cast<StoreInst>(VL[0]))
     ScalarTy = SI->getValueOperand()->getType();
-  VectorType *VecTy = VectorType::get(ScalarTy, VL.size());
+  VectorType *VecTy = getVectorType(ScalarTy, VL.size());
   // Find the cost of inserting/extracting values from the vector.
   // Check if the same elements are inserted several times and count them as
   // shuffle candidates.
@@ -3041,11 +3041,9 @@ Value *BoUpSLP::vectorizeTree(ArrayRef<Value *> VL) {
     else
       VL = UniqueValues;
   }
-    
+
   assert(OpValueTy->isVectorTy() && "Trying to widen non-vector type");
-  VectorType *VecTy =
-          VectorType::get(OpValueTy->getVectorElementType(),
-                          OpValueTy->getVectorNumElements() * VL.size());
+  VectorType *VecTy = getVectorType(OpValueTy, VL.size());
 
   Value *V = Gather(VL, VecTy);
   if (!ReuseShuffleIndicies.empty()) {
@@ -3652,7 +3650,7 @@ BoUpSLP::vectorizeTree(ExtraValueToDebugLocsMap &ExternallyUsedValues) {
       Builder.SetInsertPoint(&*++BasicBlock::iterator(I));
     auto BundleWidth = VectorizableTree[0].Scalars.size();
     auto *MinTy = IntegerType::get(F->getContext(), MinBWs[ScalarRoot].first);
-    auto *VecTy = VectorType::get(MinTy, BundleWidth);
+    auto *VecTy = getVectorType(MinTy, BundleWidth);
     auto *Trunc = Builder.CreateTrunc(VectorRoot, VecTy);
     VectorizableTree[0].VectorizedValue = Trunc;
   }
@@ -5879,7 +5877,7 @@ private:
   int getReductionCost(TargetTransformInfo *TTI, Value *FirstReducedVal,
                        unsigned ReduxWidth) {
     Type *ScalarTy = FirstReducedVal->getType();
-    Type *VecTy = VectorType::get(ScalarTy, ReduxWidth);
+    Type *VecTy = getVectorType(ScalarTy, ReduxWidth);
 
     int PairwiseRdxCost;
     int SplittingRdxCost;
