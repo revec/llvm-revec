@@ -3074,7 +3074,6 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
     ElementTy = SI->getValueOperand()->getType();
 
   VectorType *VecTy = getVectorType(ElementTy, E->Scalars.size());
-  // Type *ScalarTy = VecTy->getElementType();
 
 	DEBUG(dbgs() << "Revec: vectorizing bundle : \n");
 	DEBUG(
@@ -5019,8 +5018,7 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
     // No actual vectorization should happen, if number of parts is the same as
     // provided vectorization factor (i.e. the scalar type is used for vector
     // code during codegen).
-    // TODO: Widen VL[0]->getType() -- this will likely lead to an assertion failure as of now
-    auto *VecTy = VectorType::get(VL[0]->getType(), VF);
+    auto *VecTy = getVectorType(VL[0]->getType(), VF);
     if (TTI->getNumberOfParts(VecTy) == VF)
       continue;
     for (unsigned I = NextInst; I < MaxInst; ++I) {
@@ -6495,6 +6493,15 @@ bool RevectorizerPass::vectorizeStoreChains(BoUpSLP &R) {
   }
   return Changed;
 }
+
+#if 0
+static void registerPass(const PassManagerBuilder &,
+                         PassManagerBase &PM) {
+  PM.add(createRevectorizerPass());
+}
+
+RegisterMyPass(PassManagerBuilder::EP_LoopOptimizerEnd, registerPass);
+#endif
 
 char Revectorizer::ID = 0;
 
