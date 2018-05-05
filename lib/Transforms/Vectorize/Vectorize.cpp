@@ -42,3 +42,7 @@ void LLVMAddLoopVectorizePass(LLVMPassManagerRef PM) {
 void LLVMAddSLPVectorizePass(LLVMPassManagerRef PM) {
   unwrap(PM)->add(createSLPVectorizerPass());
 }
+
+void LLVMAddRevectorizePass(LLVMPassManagerRef PM) {
+  unwrap(PM)->add(createRevectorizerPass());
+}

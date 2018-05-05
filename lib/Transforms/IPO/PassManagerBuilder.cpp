@@ -58,6 +58,10 @@ RunSLPVectorization("vectorize-slp", cl::Hidden,
                     cl::desc("Run the SLP vectorization passes"));
 
 static cl::opt<bool>
+RunRevectorization("vectorize-revec", cl::Hidden,
+                    cl::desc("Run the revectorization passes"));
+
+static cl::opt<bool>
 UseGVNAfterVectorization("use-gvn-after-vectorization",
   cl::init(false), cl::Hidden,
   cl::desc("Run GVN instead of Early CSE after vectorization passes"));
@@ -160,6 +164,7 @@ PassManagerBuilder::PassManagerBuilder() {
     DisableUnrollLoops = false;
     SLPVectorize = RunSLPVectorization;
     LoopVectorize = RunLoopVectorization;
+    Revectorize = RunRevectorization;
     RerollLoops = RunLoopRerolling;
     NewGVN = RunNewGVN;
     DisableGVNLoadPRE = false;
@@ -405,6 +410,8 @@ void PassManagerBuilder::addFunctionSimplificationPasses(
     MPM.add(createLoopRerollPass());
   if (!RunSLPAfterLoopVectorization && SLPVectorize)
     MPM.add(createSLPVectorizerPass()); // Vectorize parallel scalar chains.
+  if (Revectorize)
+    MPM.add(createRevectorizerPass()); // Widen parallel vector intrinsic chains.
 
   MPM.add(createAggressiveDCEPass());         // Delete dead instructions
   MPM.add(createCFGSimplificationPass()); // Merge & remove BBs

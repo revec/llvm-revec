@@ -147,6 +147,7 @@ public:
   bool DisableUnrollLoops;
   bool SLPVectorize;
   bool LoopVectorize;
+  bool Revectorize;
   bool RerollLoops;
   bool NewGVN;
   bool DisableGVNLoadPRE;

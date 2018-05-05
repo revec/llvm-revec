@@ -154,6 +154,7 @@
 #include "llvm/Transforms/Utils/SymbolRewriter.h"
 #include "llvm/Transforms/Vectorize/LoopVectorize.h"
 #include "llvm/Transforms/Vectorize/SLPVectorizer.h"
+#include "llvm/Transforms/Vectorize/Revectorizer/Revectorizer.h"
 
 using namespace llvm;
 
@@ -795,6 +796,9 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
 
   // Optimize parallel scalar instruction chains into SIMD instructions.
   OptimizePM.addPass(SLPVectorizerPass());
+
+  // Optimize parallel vector instruction chains into wider SIMD instructions.
+  OptimizePM.addPass(RevectorizerPass());
 
   OptimizePM.addPass(InstCombinePass());
 

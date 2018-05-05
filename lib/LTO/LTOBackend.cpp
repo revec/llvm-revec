@@ -265,6 +265,7 @@ static void runOldPMPasses(Config &Conf, Module &Mod, TargetMachine *TM,
   PMB.VerifyOutput = !Conf.DisableVerify;
   PMB.LoopVectorize = true;
   PMB.SLPVectorize = true;
+  PMB.Revectorize = true;
   PMB.OptLevel = Conf.OptLevel;
   PMB.PGOSampleUse = Conf.SampleProfile;
   if (IsThinLTO)

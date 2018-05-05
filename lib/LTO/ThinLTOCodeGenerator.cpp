@@ -230,6 +230,7 @@ static void optimizeModule(Module &TheModule, TargetMachine &TM,
   PMB.OptLevel = OptLevel;
   PMB.LoopVectorize = true;
   PMB.SLPVectorize = true;
+  PMB.Revectorize = true;
   // Already did this in verifyLoadedModule().
   PMB.VerifyInput = false;
   PMB.VerifyOutput = false;

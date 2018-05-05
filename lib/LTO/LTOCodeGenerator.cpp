@@ -533,6 +533,7 @@ bool LTOCodeGenerator::optimize(bool DisableVerify, bool DisableInline,
   PMB.DisableGVNLoadPRE = DisableGVNLoadPRE;
   PMB.LoopVectorize = !DisableVectorization;
   PMB.SLPVectorize = !DisableVectorization;
+  PMB.Revectorize = !DisableVectorization;
   if (!DisableInline)
     PMB.Inliner = createFunctionInliningPass();
   PMB.LibraryInfo = new TargetLibraryInfoImpl(TargetTriple);
