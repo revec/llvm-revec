@@ -408,10 +408,12 @@ void PassManagerBuilder::addFunctionSimplificationPasses(
 
   if (RerollLoops)
     MPM.add(createLoopRerollPass());
-  if (!RunSLPAfterLoopVectorization && SLPVectorize)
-    MPM.add(createSLPVectorizerPass()); // Vectorize parallel scalar chains.
-  if (Revectorize)
-    MPM.add(createRevectorizerPass()); // Widen parallel vector intrinsic chains.
+  if (!RunSLPAfterLoopVectorization) {
+    if (SLPVectorize)
+      MPM.add(createSLPVectorizerPass()); // Vectorize parallel scalar chains.
+    if (Revectorize)
+      MPM.add(createRevectorizerPass()); // Widen parallel vector intrinsic chains.
+  }
 
   MPM.add(createAggressiveDCEPass());         // Delete dead instructions
   MPM.add(createCFGSimplificationPass()); // Merge & remove BBs
@@ -669,8 +671,11 @@ void PassManagerBuilder::populateModulePassManager(
   // before SLP vectorization.
   MPM.add(createCFGSimplificationPass(1, true, true, false, true));
 
-  if (RunSLPAfterLoopVectorization && SLPVectorize) {
-    MPM.add(createSLPVectorizerPass()); // Vectorize parallel scalar chains.
+  if (RunSLPAfterLoopVectorization && (SLPVectorize || Revectorize)) {
+    if (SLPVectorize)
+      MPM.add(createSLPVectorizerPass()); // Vectorize parallel scalar chains.
+    if (Revectorize)
+      MPM.add(createRevectorizerPass()); // Widen parallel vector intrinsic chains.
     if (OptLevel > 1 && ExtraVectorizerPasses) {
       MPM.add(createEarlyCSEPass());
     }
@@ -875,9 +880,12 @@ void PassManagerBuilder::addLTOOptimizationPasses(legacy::PassManagerBase &PM) {
   PM.add(createBitTrackingDCEPass());
 
   // More scalar chains could be vectorized due to more alias information
-  if (RunSLPAfterLoopVectorization)
+  if (RunSLPAfterLoopVectorization) {
     if (SLPVectorize)
       PM.add(createSLPVectorizerPass()); // Vectorize parallel scalar chains.
+    if (Revectorize)
+      PM.add(createRevectorizerPass()); // Widen parallel vector intrinsic chains.
+  }
 
   // After vectorization, assume intrinsics may tell us more about pointer
   // alignments.
