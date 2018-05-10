@@ -803,8 +803,13 @@ private:
 
   /// This POD struct describes one external user in the vectorized tree.
   struct ExternalUser {
+#if 0
+    ExternalUser(Value *S, llvm::User *U, int L, unsigned N)
+        : Scalar(S), User(U), Lane(L), NumElements(N) {}
+#else
     ExternalUser(Value *S, llvm::User *U, int L)
         : Scalar(S), User(U), Lane(L) {}
+#endif
 
     // Which scalar in our function.
     Value *Scalar;
@@ -812,8 +817,13 @@ private:
     // Which user that uses the scalar.
     llvm::User *User;
 
-    // Which lane does the scalar belong to.
+    // Which lane does the scalar/vector start at/belong to.
     int Lane;
+
+#if 0
+    // How many lanes does the use consume?
+    int NumElements;
+#endif
   };
   using UserList = SmallVector<ExternalUser, 16>;
 
@@ -1389,8 +1399,18 @@ void BoUpSLP::buildTree(ArrayRef<Value *> Roots,
       auto ExtI = ExternallyUsedValues.find(Scalar);
       if (ExtI != ExternallyUsedValues.end()) {
         DEBUG(dbgs() << "Revec: Need to extract: Extra arg from lane " <<
-              Lane << " from " << *Scalar << ".\n");
+        Lane << " from " << *Scalar << ".\n");
+#if 0
+        Type *ScalarTy = Scalar->getType();
+        if (ScalarTy->isVectorTy()) {
+          unsigned NumElements = ScalarTy->getVectorNumElements();
+          ExternalUses.emplace_back(Scalar, nullptr, FoundLane, NumElements);
+        } else {
+          ExternalUses.emplace_back(Scalar, nullptr, FoundLane, 1);
+        }
+#else
         ExternalUses.emplace_back(Scalar, nullptr, FoundLane);
+#endif
       }
       for (User *U : Scalar->users()) {
         DEBUG(dbgs() << "Revec: Checking user:" << *U << ".\n");
@@ -2597,6 +2617,7 @@ int BoUpSLP::getTreeCost() {
       auto Extend =
           MinBWs[ScalarRoot].second ? Instruction::SExt : Instruction::ZExt;
       VecTy = getVectorType(MinTy, BundleWidth);
+      // TODO: Change this to the cost of a shuffle
       ExtractCost += TTI->getExtractWithExtendCost(Extend, EU.Scalar->getType(),
                                                    VecTy, EU.Lane);
     } else {
@@ -3728,8 +3749,22 @@ BoUpSLP::vectorizeTree(ExtraValueToDebugLocsMap &ExternallyUsedValues) {
         }
       } else {
         Builder.SetInsertPoint(cast<Instruction>(User));
-        Value *Ex = Builder.CreateExtractElement(Vec, Lane);
-        Ex = extend(ScalarRoot, Ex, Scalar->getType());
+        assert(Scalar->getType()->isVectorTy() && "Attempt to extract scalar for an external user!");
+
+        // Build a mask Lane*NumToExtract, ..., (Lane+1)*NumToExtract - 1
+        unsigned NumToExtract = Scalar->getType()->getVectorNumElements();
+        // TODO: Will we want to extract more than 32 values?
+        SmallVector<Constant *, 32> Mask(
+            NumToExtract, UndefValue::get(Builder.getInt32Ty()));
+        for (unsigned i = 0; i < NumToExtract; ++i)
+          Mask[i] = Builder.getInt32(ExternalUse.Lane * NumToExtract + i);
+        Value *ShuffleMask = ConstantVector::get(Mask);
+
+        Value *UndefVec = UndefValue::get(Vec->getType());
+        Value *Ex = Builder.CreateShuffleVector(Vec, UndefVec, ShuffleMask);
+
+        // Value *Ex = Builder.CreateExtractElement(Vec, Lane);
+        // Ex = extend(ScalarRoot, Ex, Scalar->getType());
         CSEBlocks.insert(cast<Instruction>(User)->getParent());
         User->replaceUsesOfWith(Scalar, Ex);
       }
