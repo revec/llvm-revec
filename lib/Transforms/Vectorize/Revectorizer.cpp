@@ -146,7 +146,7 @@ static cl::opt<unsigned> MinTreeSize(
     cl::desc("Only vectorize small trees if they are fully vectorizable"));
 
 static cl::opt<bool>
-    ViewRevecTree("view-revec-tree", cl::Hidden,
+    WriteRevecTree("write-revec-tree", cl::Hidden,
                 cl::desc("Display the SLP trees with Graphviz"));
 
 // Limit the number of alias checks. The limit is chosen so that
@@ -2638,8 +2638,8 @@ int BoUpSLP::getTreeCost() {
   }
   DEBUG(dbgs() << Str);
 
-  if (ViewRevecTree)
-    ViewGraph(this, "Revec" + F->getName(), false, Str);
+  if (WriteRevecTree)
+    WriteGraph(this, "Revec" + F->getName(), false, Str);
 
   return Cost;
 }
