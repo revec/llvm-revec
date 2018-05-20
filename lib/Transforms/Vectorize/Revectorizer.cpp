@@ -731,8 +731,12 @@ private:
   /// the bundle
   void setInsertPointAfterBundle(ArrayRef<Value *> VL, Value *OpValue);
 
-  /// \returns a vector from a collection of scalars in \p VL.
+  /// \returns a concatenated vector from a collection of vectors in \p VL.
   Value *Gather(ArrayRef<Value *> VL, VectorType *Ty);
+
+  /// \returns a concatenated vector from a collection of vectors in \p VL, ranging
+  /// from VL[start] to VL[end - 1].
+  Value *Gather_rec(ArrayRef<Value *> VL, VectorType *Ty, int start, int end);
 
   /// \returns whether the VectorizableTree is fully vectorizable and will
   /// be beneficial even the tree height is tiny.
@@ -2919,59 +2923,76 @@ void BoUpSLP::setInsertPointAfterBundle(ArrayRef<Value *> VL, Value *OpValue) {
 }
 
 Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
-  // Create undefined vector to populate
-  Value *Vec = UndefValue::get(Ty);
+  unsigned size = VL.size();
+  assert(((size & (size - 1)) == 0) && "Gathering value list that is not of a power of two length");
 
-  // Generate a pair of 'ExtractElement' and 'InsertElement'
-  // instructions for each scalar in each VL vector
-  unsigned numExtracted = 0;
-  for (Value *elementVector : VL) {
-    // TODO: Could support inserting scalars as well
-    Type *VLTy = elementVector->getType();
-    assert(VLTy->isVectorTy() && "attempted to extend a vector with a non-vector type");
+  Value *gathered = Gather_rec(VL, Ty, 0, size);
 
-    TreeEntry *E = getTreeEntry(elementVector);
+  // TODO: Pad vector with undefs if the type does not match?
+  assert(gathered->getType()->getTypeID() == Ty->getTypeID() && "Gather generated a value of the incorrect type");
+  assert(gathered->getType()->getVectorNumElements() == Ty->getVectorNumElements() && "Gather generated a value with the incorrect number of elements");
 
-    // TODO: Cancel scheduling or assert false for type mismatch
+  if (Instruction *Insrt = dyn_cast<Instruction>(gathered)) {
+    // Record this gather/insert for later optimization
+    GatherSeq.insert(Insrt);
+    CSEBlocks.insert(Insrt->getParent());
 
-    for (unsigned j = 0; j < VLTy->getVectorNumElements(); ++j) {
-      Value *ScalarEl = Builder.CreateExtractElement(elementVector, Builder.getInt32(j));
-      Vec = Builder.CreateInsertElement(Vec, ScalarEl, Builder.getInt32(numExtracted));
-      ++numExtracted;
+    for (Value *elementVector : VL) {
+      TreeEntry *E = getTreeEntry(elementVector);
 
-      if (Instruction *Insrt = dyn_cast<Instruction>(Vec)) {
-        // Record this gather/insert for later optimization
-        GatherSeq.insert(Insrt);
-        CSEBlocks.insert(Insrt->getParent());
-
-        // Add to our 'need-to-extract' list.
-        if (E) {
-          // Find which lane we need to extract.
-          int FoundLane = -1;
-          for (unsigned Lane = 0, LE = E->Scalars.size(); Lane != LE; ++Lane) {
-            // Is this the lane containing the vector that we are looking for?
-            if (E->Scalars[Lane] == elementVector) {
-              FoundLane = Lane;
-              break;
-            }
+      // Add to our 'need-to-extract' list.
+      if (E) {
+        // Find which lane we need to extract.
+        int FoundLane = -1;
+        for (unsigned Lane = 0, LE = E->Scalars.size(); Lane != LE; ++Lane) {
+          // Is this the lane containing the vector that we are looking for?
+          if (E->Scalars[Lane] == elementVector) {
+            FoundLane = Lane;
+            break;
           }
-          assert(FoundLane >= 0 && "Could not find the correct lane");
-          if (!E->ReuseShuffleIndices.empty()) {
-            FoundLane =
-                    std::distance(E->ReuseShuffleIndices.begin(),
-                                  llvm::find(E->ReuseShuffleIndices, FoundLane));
-          }
-          ExternalUses.push_back(ExternalUser(elementVector, Insrt, FoundLane));
         }
+        assert(FoundLane >= 0 && "Could not find the correct lane");
+        if (!E->ReuseShuffleIndices.empty()) {
+          FoundLane =
+                  std::distance(E->ReuseShuffleIndices.begin(),
+                                llvm::find(E->ReuseShuffleIndices, FoundLane));
+        }
+        ExternalUses.push_back(ExternalUser(elementVector, Insrt, FoundLane));
       }
     }
   }
 
-  DEBUG(dbgs() << "Revec: During gather, extracted and inserted" << numExtracted << " scalars to place in vector "
-               << *Vec << " (fits " << Ty->getNumElements() << " elements)\n");
+  return gathered;
+}
 
+Value *BoUpSLP::Gather_rec(ArrayRef<Value *> VL, VectorType *Ty, int start, int end) {
+  assert((end >= start) && "Bad bounds passed to Gather_rec");
+  int size = end - start;
 
-  return Vec;
+  if (size == 0)
+    return nullptr;
+
+  if (size == 1)
+    return VL[start];
+
+  int sizeLeft = size / 2;
+  Value *L = Gather_rec(VL, Ty, start, start + sizeLeft);
+  Value *R = Gather_rec(VL, Ty, start + sizeLeft, end);
+
+  if (L && R) {
+    SmallVector<uint32_t, 16> mask;
+
+    uint32_t i = 0;
+    for (; i < L->getType()->getVectorNumElements(); ++i)
+      mask.emplace_back(i);
+
+    for (uint32_t j = 0; j < R->getType()->getVectorNumElements(); ++j, ++i)
+      mask.emplace_back(i);
+
+    return Builder.CreateShuffleVector(L, R, mask);
+  }
+
+  return L ? L : R;
 }
 
 Value *BoUpSLP::vectorizeTree(ArrayRef<Value *> VL) {
