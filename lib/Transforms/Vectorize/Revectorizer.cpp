@@ -738,6 +738,10 @@ private:
   /// from VL[start] to VL[end - 1].
   Value *Gather_rec(ArrayRef<Value *> VL, VectorType *Ty, int start, int end);
 
+  Value *Gather_two(Value *L, Value *R);
+
+  void RecordExternalUse(Value *ElementVector, llvm::User *User);
+
   /// \returns whether the VectorizableTree is fully vectorizable and will
   /// be beneficial even the tree height is tiny.
   bool isFullyVectorizableTinyTree();
@@ -2922,6 +2926,30 @@ void BoUpSLP::setInsertPointAfterBundle(ArrayRef<Value *> VL, Value *OpValue) {
   Builder.SetCurrentDebugLocation(Front->getDebugLoc());
 }
 
+void BoUpSLP::RecordExternalUse(Value *ElementVector, llvm::User *User) {
+  TreeEntry *E = getTreeEntry(ElementVector);
+
+  // Add to our 'need-to-extract' list.
+  if (E) {
+    // Find which lane we need to extract.
+    int FoundLane = -1;
+    for (unsigned Lane = 0, LE = E->Scalars.size(); Lane != LE; ++Lane) {
+      // Is this the lane containing the vector that we are looking for?
+      if (E->Scalars[Lane] == ElementVector) {
+        FoundLane = Lane;
+        break;
+      }
+    }
+    assert(FoundLane >= 0 && "Could not find the correct lane");
+    if (!E->ReuseShuffleIndices.empty()) {
+      FoundLane =
+              std::distance(E->ReuseShuffleIndices.begin(),
+                            llvm::find(E->ReuseShuffleIndices, FoundLane));
+    }
+    ExternalUses.push_back(ExternalUser(ElementVector, User, FoundLane));
+  }
+}
+
 Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
   unsigned size = VL.size();
   assert(((size & (size - 1)) == 0) && "Gathering value list that is not of a power of two length");
@@ -2932,65 +2960,52 @@ Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
   assert(gathered->getType()->getTypeID() == Ty->getTypeID() && "Gather generated a value of the incorrect type");
   assert(gathered->getType()->getVectorNumElements() == Ty->getVectorNumElements() && "Gather generated a value with the incorrect number of elements");
 
-  if (Instruction *Insrt = dyn_cast<Instruction>(gathered)) {
-    // Record this gather/insert for later optimization
-    GatherSeq.insert(Insrt);
-    CSEBlocks.insert(Insrt->getParent());
-
-    for (Value *elementVector : VL) {
-      TreeEntry *E = getTreeEntry(elementVector);
-
-      // Add to our 'need-to-extract' list.
-      if (E) {
-        // Find which lane we need to extract.
-        int FoundLane = -1;
-        for (unsigned Lane = 0, LE = E->Scalars.size(); Lane != LE; ++Lane) {
-          // Is this the lane containing the vector that we are looking for?
-          if (E->Scalars[Lane] == elementVector) {
-            FoundLane = Lane;
-            break;
-          }
-        }
-        assert(FoundLane >= 0 && "Could not find the correct lane");
-        if (!E->ReuseShuffleIndices.empty()) {
-          FoundLane =
-                  std::distance(E->ReuseShuffleIndices.begin(),
-                                llvm::find(E->ReuseShuffleIndices, FoundLane));
-        }
-        ExternalUses.push_back(ExternalUser(elementVector, Insrt, FoundLane));
-      }
-    }
-  }
-
   return gathered;
+}
+
+Value *BoUpSLP::Gather_two(Value *L, Value *R) {
+  SmallVector<uint32_t, 16> mask;
+
+  uint32_t i = 0;
+  for (; i < L->getType()->getVectorNumElements(); ++i)
+    mask.emplace_back(i);
+
+  for (uint32_t j = 0; j < R->getType()->getVectorNumElements(); ++j, ++i)
+    mask.emplace_back(i);
+
+  return Builder.CreateShuffleVector(L, R, mask);
 }
 
 Value *BoUpSLP::Gather_rec(ArrayRef<Value *> VL, VectorType *Ty, int start, int end) {
   assert((end >= start) && "Bad bounds passed to Gather_rec");
   int size = end - start;
+  assert((((unsigned) size & ((unsigned) size - 1)) == 0) && "Recursively gathering value list that is not of a power of two length");
 
   if (size == 0)
     return nullptr;
 
-  if (size == 1)
-    return VL[start];
+  if (size == 2) {
+    Value *Vec = Gather_two(VL[start], VL[start+1]);
+
+    // Record external use of VL[start] and VL[start+1]
+    if (Instruction *Insrt = dyn_cast<Instruction>(Vec)) {
+      // Record this gather/insert for later optimization
+      GatherSeq.insert(Insrt);
+      CSEBlocks.insert(Insrt->getParent());
+
+      RecordExternalUse(VL[start], Insrt);
+      RecordExternalUse(VL[start+1], Insrt);
+    }
+
+    return Vec;
+  }
 
   int sizeLeft = size / 2;
   Value *L = Gather_rec(VL, Ty, start, start + sizeLeft);
   Value *R = Gather_rec(VL, Ty, start + sizeLeft, end);
 
-  if (L && R) {
-    SmallVector<uint32_t, 16> mask;
-
-    uint32_t i = 0;
-    for (; i < L->getType()->getVectorNumElements(); ++i)
-      mask.emplace_back(i);
-
-    for (uint32_t j = 0; j < R->getType()->getVectorNumElements(); ++j, ++i)
-      mask.emplace_back(i);
-
-    return Builder.CreateShuffleVector(L, R, mask);
-  }
+  if (L && R)
+    return Gather_two(L, R);
 
   return L ? L : R;
 }
