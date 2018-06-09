@@ -1903,69 +1903,6 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
       BS.cancelScheduling(VL, VL0);
       newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
       return;
-
-#if 0
-      // Check if this is an Intrinsic call or something that can be
-      // represented by an intrinsic call
-      Intrinsic::ID ID = getVectorIntrinsicIDForCall(CI, TLI);
-      if (!isTriviallyVectorizable(ID)) {
-        BS.cancelScheduling(VL, VL0);
-        newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
-        DEBUG(dbgs() << "Revec: Non-vectorizable call.\n");
-        return;
-      }
-      Value *A1I = nullptr;
-      if (hasVectorInstrinsicScalarOpd(ID, 1))
-        A1I = CI->getArgOperand(1);
-      for (unsigned i = 1, e = VL.size(); i != e; ++i) {
-        CallInst *CI2 = dyn_cast<CallInst>(VL[i]);
-        if (!CI2 || CI2->getCalledFunction() != Int ||
-            getVectorIntrinsicIDForCall(CI2, TLI) != ID ||
-            !CI->hasIdenticalOperandBundleSchema(*CI2)) {
-          BS.cancelScheduling(VL, VL0);
-          newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
-          DEBUG(dbgs() << "Revec: mismatched calls:" << *CI << "!=" << *VL[i]
-                       << "\n");
-          return;
-        }
-        // ctlz,cttz and powi are special intrinsics whose second argument
-        // should be same in order for them to be vectorized.
-        if (hasVectorInstrinsicScalarOpd(ID, 1)) {
-          Value *A1J = CI2->getArgOperand(1);
-          if (A1I != A1J) {
-            BS.cancelScheduling(VL, VL0);
-            newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
-            DEBUG(dbgs() << "Revec: mismatched arguments in call:" << *CI
-                         << " argument "<< A1I<<"!=" << A1J
-                         << "\n");
-            return;
-          }
-        }
-        // Verify that the bundle operands are identical between the two calls.
-        if (CI->hasOperandBundles() &&
-            !std::equal(CI->op_begin() + CI->getBundleOperandsStartIndex(),
-                        CI->op_begin() + CI->getBundleOperandsEndIndex(),
-                        CI2->op_begin() + CI2->getBundleOperandsStartIndex())) {
-          BS.cancelScheduling(VL, VL0);
-          newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndicies);
-          DEBUG(dbgs() << "Revec: mismatched bundle operands in calls:" << *CI << "!="
-                       << *VL[i] << '\n');
-          return;
-        }
-      }
-
-      newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndicies);
-      for (unsigned i = 0, e = CI->getNumArgOperands(); i != e; ++i) {
-        ValueList Operands;
-        // Prepare the operand vector.
-        for (Value *j : VL) {
-          CallInst *CI2 = dyn_cast<CallInst>(j);
-          Operands.push_back(CI2->getArgOperand(i));
-        }
-        buildTree_rec(Operands, Depth + 1, UserTreeIdx);
-      }
-      return;
-#endif
     }
     case Instruction::ShuffleVector:
       // If this is not an alternate sequence of opcode like add-sub
@@ -2089,10 +2026,7 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
   VectorType *VecTy = getVectorType(ElementTy, VL.size());
   Type *ScalarTy = VecTy->getElementType();
 
-  // TODO: Update cost model to handle vector VL
-#if 1
-  return -1;
-#else
+  // TODO: Update cost model to handle vector-containing VL
   unsigned ReuseShuffleNumbers = E->ReuseShuffleIndices.size();
   bool NeedToShuffleReuses = !E->ReuseShuffleIndices.empty();
   int ReuseShuffleCost = 0;
@@ -2100,13 +2034,17 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
     ReuseShuffleCost =
         TTI->getShuffleCost(TargetTransformInfo::SK_PermuteSingleSrc, VecTy);
   }
+  // TODO: Check that this gather cost is not too aggressive
   if (E->NeedToGather) {
     if (allConstant(VL))
       return 0;
+    // TODO: Can a sub-vector be broadcast?
+    #if 0
     if (isSplat(VL)) {
       return ReuseShuffleCost +
              TTI->getShuffleCost(TargetTransformInfo::SK_Broadcast, VecTy, 0);
     }
+    #endif
     if (getSameOpcode(VL).Opcode == Instruction::ExtractElement &&
         allSameType(VL) && allSameBlock(VL)) {
       Optional<TargetTransformInfo::ShuffleKind> ShuffleKind = isShuffle(VL);
@@ -2130,6 +2068,7 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
     }
     return ReuseShuffleCost + getGatherCost(VL);
   }
+
   InstructionsState S = getSameOpcode(VL);
   assert(S.Opcode && allSameType(VL) && allSameBlock(VL) && "Invalid VL");
   Instruction *VL0 = cast<Instruction>(S.OpValue);
@@ -2139,6 +2078,7 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
     case Instruction::PHI:
       return 0;
 
+#if 0
     case Instruction::ExtractValue:
     case Instruction::ExtractElement:
       if (NeedToShuffleReuses) {
@@ -2434,8 +2374,11 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
     }
     default:
       llvm_unreachable("Unknown instruction");
-  }
+#else
+    default:
+      return -1;
 #endif
+  }
 }
 
 bool BoUpSLP::isFullyVectorizableTinyTree() {
@@ -2635,10 +2578,10 @@ int BoUpSLP::getGatherCost(Type *Ty,
 
 int BoUpSLP::getGatherCost(ArrayRef<Value *> VL) {
   // Find the type of the operands in VL.
-  Type *ScalarTy = VL[0]->getType();
+  Type *NarrowVectorTy = VL[0]->getType();
   if (StoreInst *SI = dyn_cast<StoreInst>(VL[0]))
-    ScalarTy = SI->getValueOperand()->getType();
-  VectorType *VecTy = getVectorType(ScalarTy, VL.size());
+    NarrowVectorTy = SI->getValueOperand()->getType();
+  VectorType *VecTy = getVectorType(NarrowVectorTy, VL.size());
   // Find the cost of inserting/extracting values from the vector.
   // Check if the same elements are inserted several times and count them as
   // shuffle candidates.
