@@ -2955,7 +2955,14 @@ Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
 #if 1
   assert((size == 2) && "Gathering value list that is not of length two");
 
+  DEBUG(dbgs() << "Revec: Gathering a value list of length 2:\n");
+  DEBUG(dbgs() << "Revec:    " << *VL[0] << "\n");
+  DEBUG(dbgs() << "Revec:    " << *VL[1] << "\n");
+
   Value *gathered = Gather_two(VL[0], VL[1]);
+
+  DEBUG(dbgs() << "Revec: Gathered:\n");
+  DEBUG(dbgs() << "Revec:    " << *gathered << "\n");
 
   assert(gathered->getType()->getTypeID() == Ty->getTypeID() && "Gather generated a value of the incorrect type");
   assert(gathered->getType()->getVectorNumElements() == Ty->getVectorNumElements() && "Gather generated a value with the incorrect number of elements");
