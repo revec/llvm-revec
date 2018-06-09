@@ -2952,6 +2952,16 @@ void BoUpSLP::RecordExternalUse(Value *ElementVector, llvm::User *User) {
 
 Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
   unsigned size = VL.size();
+#if 1
+  assert((size == 2) && "Gathering value list that is not of length two");
+
+  Value *gathered = Gather_two(VL[0], VL[1]);
+
+  assert(gathered->getType()->getTypeID() == Ty->getTypeID() && "Gather generated a value of the incorrect type");
+  assert(gathered->getType()->getVectorNumElements() == Ty->getVectorNumElements() && "Gather generated a value with the incorrect number of elements");
+
+  return gathered;
+#else
   assert(((size & (size - 1)) == 0) && "Gathering value list that is not of a power of two length");
 
   Value *gathered = Gather_rec(VL, Ty, 0, size);
@@ -2961,28 +2971,29 @@ Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
   assert(gathered->getType()->getVectorNumElements() == Ty->getVectorNumElements() && "Gather generated a value with the incorrect number of elements");
 
   return gathered;
+#endif
 }
 
 Value *BoUpSLP::Gather_two(Value *L, Value *R) {
-  SmallVector<uint32_t, 16> mask;
+  SmallVector<uint32_t, 32> mask;
 
-  uint32_t i = 0;
-  for (; i < L->getType()->getVectorNumElements(); ++i)
-    mask.emplace_back(i);
+  unsigned leftElems = L->getType()->getVectorNumElements();
+  unsigned rightElems = R->getType()->getVectorNumElements();
 
-  for (uint32_t j = 0; j < R->getType()->getVectorNumElements(); ++j, ++i)
+  assert((leftElems > 0 && leftElems == rightElems) && "Bad sizes for gathered operands");
+
+  for (uint32_t i = 0; i < leftElems + rightElems; ++i) {
     mask.emplace_back(i);
+  }
 
   return Builder.CreateShuffleVector(L, R, mask);
 }
 
+#if 0
 Value *BoUpSLP::Gather_rec(ArrayRef<Value *> VL, VectorType *Ty, int start, int end) {
   assert((end >= start) && "Bad bounds passed to Gather_rec");
   int size = end - start;
-  assert((((unsigned) size & ((unsigned) size - 1)) == 0) && "Recursively gathering value list that is not of a power of two length");
-
-  if (size == 0)
-    return nullptr;
+  assert((((unsigned) size & ((unsigned) size - 1)) == 0) && size != 1 && "Recursively gathering value list that is not of a power of two length, or is length 1");
 
   if (size == 2) {
     Value *Vec = Gather_two(VL[start], VL[start+1]);
@@ -3009,6 +3020,7 @@ Value *BoUpSLP::Gather_rec(ArrayRef<Value *> VL, VectorType *Ty, int start, int 
 
   return L ? L : R;
 }
+#endif
 
 Value *BoUpSLP::vectorizeTree(ArrayRef<Value *> VL) {
   InstructionsState S = getSameOpcode(VL);
