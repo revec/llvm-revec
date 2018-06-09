@@ -603,7 +603,6 @@ public:
       BlockScheduling *BS = Iter.second.get();
       BS->clear();
     }
-    MinBWs.clear();
   }
 
   unsigned getTreeSize() const { return VectorizableTree.size(); }
@@ -630,10 +629,6 @@ public:
 
   // \return The total width in bits of elements in a vector type
   unsigned getVectorSize(Value *V);
-
-  /// Compute the minimum type sizes required to represent the entries in a
-  /// vectorizable tree.
-  void computeMinimumValueSizes();
 
   // \returns maximum vector register size as set by TTI or overridden by cl::opt.
   unsigned getMaxVecRegSize() const {
@@ -1275,13 +1270,6 @@ private:
 
   /// Instruction builder to construct the vectorized tree.
   IRBuilder<> Builder;
-
-  /// A map of scalar integer values to the smallest bit width with which they
-  /// can legally be represented. The values map to (width, signed) pairs,
-  /// where "width" indicates the minimum bit width and "signed" is True if the
-  /// value must be signed-extended, rather than zero-extended, back to its
-  /// original width.
-  MapVector<Value *, std::pair<uint64_t, bool>> MinBWs;
 };
 
 } // end namespace revectorizer
@@ -2105,12 +2093,6 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
 #if 1
   return -1;
 #else
-  // If we have computed a smaller type for the expression, update VecTy so
-  // that the costs will be accurate.
-  if (MinBWs.count(VL[0]))
-    VecTy = VectorType::get(
-        IntegerType::get(F->getContext(), MinBWs[VL[0]].first), VL.size());
-
   unsigned ReuseShuffleNumbers = E->ReuseShuffleIndices.size();
   bool NeedToShuffleReuses = !E->ReuseShuffleIndices.empty();
   int ReuseShuffleCost = 0;
@@ -2226,14 +2208,20 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       int ScalarCost = VL.size() * TTI->getCastInstrCost(VL0->getOpcode(),
                                                          VL0->getType(), SrcTy, VL0);
 
+      // TODO(ajayjain): Should VecCost be included?
+#if 0
       VectorType *SrcVecTy = getVectorType(SrcTy, VL.size());
       int VecCost = 0;
       // Check if the values are candidates to demote.
-      if (!MinBWs.count(VL0) || VecTy != SrcVecTy) {
+      // if (!MinBWs.count(VL0) || VecTy != SrcVecTy) {
         VecCost = ReuseShuffleCost +
                   TTI->getCastInstrCost(VL0->getOpcode(), VecTy, SrcVecTy, VL0);
-      }
+      // }
+
       return VecCost - ScalarCost;
+#else
+      return -1 * ScalarCost;
+#endif
     }
     case Instruction::FCmp:
     case Instruction::ICmp:
@@ -2611,23 +2599,9 @@ int BoUpSLP::getTreeCost() {
     if (EphValues.count(EU.User))
       continue;
 
-    // If we plan to rewrite the tree in a smaller type, we will need to sign
-    // extend the extracted value back to the original type. Here, we account
-    // for the extract and the added cost of the sign extend if needed.
     auto *VecTy = getVectorType(EU.Scalar->getType(), BundleWidth);
-    auto *ScalarRoot = VectorizableTree[0].Scalars[0];
-    if (MinBWs.count(ScalarRoot)) {
-      auto *MinTy = IntegerType::get(F->getContext(), MinBWs[ScalarRoot].first);
-      auto Extend =
-          MinBWs[ScalarRoot].second ? Instruction::SExt : Instruction::ZExt;
-      VecTy = getVectorType(MinTy, BundleWidth);
-      // TODO: Change this to the cost of a shuffle
-      ExtractCost += TTI->getExtractWithExtendCost(Extend, EU.Scalar->getType(),
-                                                   VecTy, EU.Lane);
-    } else {
-      ExtractCost +=
-          TTI->getVectorInstrCost(Instruction::ExtractElement, VecTy, EU.Lane);
-    }
+    ExtractCost +=
+        TTI->getVectorInstrCost(Instruction::ExtractElement, VecTy, EU.Lane);
   }
 
   int SpillCost = getSpillCost();
@@ -3666,31 +3640,7 @@ BoUpSLP::vectorizeTree(ExtraValueToDebugLocsMap &ExternallyUsedValues) {
   Builder.SetInsertPoint(&F->getEntryBlock().front());
   auto *VectorRoot = vectorizeTree(&VectorizableTree[0]);
 
-  // If the vectorized tree can be rewritten in a smaller type, we truncate the
-  // vectorized root. InstCombine will then rewrite the entire expression. We
-  // sign extend the extracted values below.
-  auto *ScalarRoot = VectorizableTree[0].Scalars[0];
-  if (MinBWs.count(ScalarRoot)) {
-    if (auto *I = dyn_cast<Instruction>(VectorRoot))
-      Builder.SetInsertPoint(&*++BasicBlock::iterator(I));
-    auto BundleWidth = VectorizableTree[0].Scalars.size();
-    auto *MinTy = IntegerType::get(F->getContext(), MinBWs[ScalarRoot].first);
-    auto *VecTy = getVectorType(MinTy, BundleWidth);
-    auto *Trunc = Builder.CreateTrunc(VectorRoot, VecTy);
-    VectorizableTree[0].VectorizedValue = Trunc;
-  }
-
   DEBUG(dbgs() << "Revec: Extracting " << ExternalUses.size() << " values .\n");
-
-  // If necessary, sign-extend or zero-extend ScalarRoot to the larger type
-  // specified by ScalarType.
-  auto extend = [&](Value *ScalarRoot, Value *Ex, Type *ScalarType) {
-    if (!MinBWs.count(ScalarRoot))
-      return Ex;
-    if (MinBWs[ScalarRoot].second)
-      return Builder.CreateSExt(Ex, ScalarType);
-    return Builder.CreateZExt(Ex, ScalarType);
-  };
 
   // Extract all of the elements with the external uses.
   for (const auto &ExternalUse : ExternalUses) {
@@ -3723,7 +3673,6 @@ BoUpSLP::vectorizeTree(ExtraValueToDebugLocsMap &ExternallyUsedValues) {
         Builder.SetInsertPoint(&F->getEntryBlock().front());
       }
       Value *Ex = Builder.CreateExtractElement(Vec, Lane);
-      Ex = extend(ScalarRoot, Ex, Scalar->getType());
       CSEBlocks.insert(cast<Instruction>(Scalar)->getParent());
       auto &Locs = ExternallyUsedValues[Scalar];
       ExternallyUsedValues.insert({Ex, Locs});
@@ -3746,7 +3695,6 @@ BoUpSLP::vectorizeTree(ExtraValueToDebugLocsMap &ExternallyUsedValues) {
               Builder.SetInsertPoint(PH->getIncomingBlock(i)->getTerminator());
             }
             Value *Ex = Builder.CreateExtractElement(Vec, Lane);
-            Ex = extend(ScalarRoot, Ex, Scalar->getType());
             CSEBlocks.insert(PH->getIncomingBlock(i));
             PH->setOperand(i, Ex);
           }
@@ -3768,14 +3716,12 @@ BoUpSLP::vectorizeTree(ExtraValueToDebugLocsMap &ExternallyUsedValues) {
         Value *Ex = Builder.CreateShuffleVector(Vec, UndefVec, ShuffleMask);
 
         // Value *Ex = Builder.CreateExtractElement(Vec, Lane);
-        // Ex = extend(ScalarRoot, Ex, Scalar->getType());
         CSEBlocks.insert(cast<Instruction>(User)->getParent());
         User->replaceUsesOfWith(Scalar, Ex);
       }
     } else {
       Builder.SetInsertPoint(&F->getEntryBlock().front());
       Value *Ex = Builder.CreateExtractElement(Vec, Lane);
-      Ex = extend(ScalarRoot, Ex, Scalar->getType());
       CSEBlocks.insert(&F->getEntryBlock());
       User->replaceUsesOfWith(Scalar, Ex);
     }
@@ -4424,222 +4370,6 @@ unsigned BoUpSLP::getVectorElementSize(Value *V) {
   return MaxWidth;
 }
 
-// Determine if a value V in a vectorizable expression Expr can be demoted to a
-// smaller type with a truncation. We collect the values that will be demoted
-// in ToDemote and additional roots that require investigating in Roots.
-static bool collectValuesToDemote(Value *V, SmallPtrSetImpl<Value *> &Expr,
-                                  SmallVectorImpl<Value *> &ToDemote,
-                                  SmallVectorImpl<Value *> &Roots) {
-  // We can always demote constants.
-  if (isa<Constant>(V)) {
-    ToDemote.push_back(V);
-    return true;
-  }
-
-  // If the value is not an instruction in the expression with only one use, it
-  // cannot be demoted.
-  auto *I = dyn_cast<Instruction>(V);
-  if (!I || !I->hasOneUse() || !Expr.count(I))
-    return false;
-
-  switch (I->getOpcode()) {
-
-  // We can always demote truncations and extensions. Since truncations can
-  // seed additional demotion, we save the truncated value.
-  case Instruction::Trunc:
-    Roots.push_back(I->getOperand(0));
-    break;
-  case Instruction::ZExt:
-  case Instruction::SExt:
-    break;
-
-  // We can demote certain binary operations if we can demote both of their
-  // operands.
-  case Instruction::Add:
-  case Instruction::Sub:
-  case Instruction::Mul:
-  case Instruction::And:
-  case Instruction::Or:
-  case Instruction::Xor:
-    if (!collectValuesToDemote(I->getOperand(0), Expr, ToDemote, Roots) ||
-        !collectValuesToDemote(I->getOperand(1), Expr, ToDemote, Roots))
-      return false;
-    break;
-
-  // We can demote selects if we can demote their true and false values.
-  case Instruction::Select: {
-    SelectInst *SI = cast<SelectInst>(I);
-    if (!collectValuesToDemote(SI->getTrueValue(), Expr, ToDemote, Roots) ||
-        !collectValuesToDemote(SI->getFalseValue(), Expr, ToDemote, Roots))
-      return false;
-    break;
-  }
-
-  // We can demote phis if we can demote all their incoming operands. Note that
-  // we don't need to worry about cycles since we ensure single use above.
-  case Instruction::PHI: {
-    PHINode *PN = cast<PHINode>(I);
-    for (Value *IncValue : PN->incoming_values())
-      if (!collectValuesToDemote(IncValue, Expr, ToDemote, Roots))
-        return false;
-    break;
-  }
-
-  // Otherwise, conservatively give up.
-  default:
-    return false;
-  }
-
-  // Record the value that we can demote.
-  ToDemote.push_back(V);
-  return true;
-}
-
-void BoUpSLP::computeMinimumValueSizes() {
-  // If there are no external uses, the expression tree must be rooted by a
-  // store. We can't demote in-memory values, so there is nothing to do here.
-  if (ExternalUses.empty())
-    return;
-
-  // We only attempt to truncate integer expressions.
-  auto &TreeRoot = VectorizableTree[0].Scalars;
-  auto *TreeRootIT = dyn_cast<IntegerType>(TreeRoot[0]->getType());
-  if (!TreeRootIT)
-    return;
-
-  // If the expression is not rooted by a store, these roots should have
-  // external uses. We will rely on InstCombine to rewrite the expression in
-  // the narrower type. However, InstCombine only rewrites single-use values.
-  // This means that if a tree entry other than a root is used externally, it
-  // must have multiple uses and InstCombine will not rewrite it. The code
-  // below ensures that only the roots are used externally.
-  SmallPtrSet<Value *, 32> Expr(TreeRoot.begin(), TreeRoot.end());
-  for (auto &EU : ExternalUses)
-    if (!Expr.erase(EU.Scalar))
-      return;
-  if (!Expr.empty())
-    return;
-
-  // Collect the scalar values of the vectorizable expression. We will use this
-  // context to determine which values can be demoted. If we see a truncation,
-  // we mark it as seeding another demotion.
-  for (auto &Entry : VectorizableTree)
-    Expr.insert(Entry.Scalars.begin(), Entry.Scalars.end());
-
-  // Ensure the roots of the vectorizable tree don't form a cycle. They must
-  // have a single external user that is not in the vectorizable tree.
-  for (auto *Root : TreeRoot)
-    if (!Root->hasOneUse() || Expr.count(*Root->user_begin()))
-      return;
-
-  // Conservatively determine if we can actually truncate the roots of the
-  // expression. Collect the values that can be demoted in ToDemote and
-  // additional roots that require investigating in Roots.
-  SmallVector<Value *, 32> ToDemote;
-  SmallVector<Value *, 4> Roots;
-  for (auto *Root : TreeRoot) {
-    // Do not include top zext/sext/trunc operations to those to be demoted, it
-    // produces noise cast<vect>, trunc <vect>, exctract <vect>, cast <extract>
-    // sequence.
-    if (isa<Constant>(Root))
-      continue;
-    auto *I = dyn_cast<Instruction>(Root);
-    if (!I || !I->hasOneUse() || !Expr.count(I))
-      return;
-    if (isa<ZExtInst>(I) || isa<SExtInst>(I))
-      continue;
-    if (auto *TI = dyn_cast<TruncInst>(I)) {
-      Roots.push_back(TI->getOperand(0));
-      continue;
-    }
-    if (!collectValuesToDemote(Root, Expr, ToDemote, Roots))
-      return;
-  }
-
-  // The maximum bit width required to represent all the values that can be
-  // demoted without loss of precision. It would be safe to truncate the roots
-  // of the expression to this width.
-  auto MaxBitWidth = 8u;
-
-  // We first check if all the bits of the roots are demanded. If they're not,
-  // we can truncate the roots to this narrower type.
-  for (auto *Root : TreeRoot) {
-    auto Mask = DB->getDemandedBits(cast<Instruction>(Root));
-    MaxBitWidth = std::max<unsigned>(
-        Mask.getBitWidth() - Mask.countLeadingZeros(), MaxBitWidth);
-  }
-
-  // True if the roots can be zero-extended back to their original type, rather
-  // than sign-extended. We know that if the leading bits are not demanded, we
-  // can safely zero-extend. So we initialize IsKnownPositive to True.
-  bool IsKnownPositive = true;
-
-  // If all the bits of the roots are demanded, we can try a little harder to
-  // compute a narrower type. This can happen, for example, if the roots are
-  // getelementptr indices. InstCombine promotes these indices to the pointer
-  // width. Thus, all their bits are technically demanded even though the
-  // address computation might be vectorized in a smaller type.
-  //
-  // We start by looking at each entry that can be demoted. We compute the
-  // maximum bit width required to store the scalar by using ValueTracking to
-  // compute the number of high-order bits we can truncate.
-  if (MaxBitWidth == DL->getTypeSizeInBits(TreeRoot[0]->getType())) {
-    MaxBitWidth = 8u;
-
-    // Determine if the sign bit of all the roots is known to be zero. If not,
-    // IsKnownPositive is set to False.
-    IsKnownPositive = llvm::all_of(TreeRoot, [&](Value *R) {
-      KnownBits Known = computeKnownBits(R, *DL);
-      return Known.isNonNegative();
-    });
-
-    // Determine the maximum number of bits required to store the scalar
-    // values.
-    for (auto *Scalar : ToDemote) {
-      auto NumSignBits = ComputeNumSignBits(Scalar, *DL, 0, AC, nullptr, DT);
-      auto NumTypeBits = DL->getTypeSizeInBits(Scalar->getType());
-      MaxBitWidth = std::max<unsigned>(NumTypeBits - NumSignBits, MaxBitWidth);
-    }
-
-    // If we can't prove that the sign bit is zero, we must add one to the
-    // maximum bit width to account for the unknown sign bit. This preserves
-    // the existing sign bit so we can safely sign-extend the root back to the
-    // original type. Otherwise, if we know the sign bit is zero, we will
-    // zero-extend the root instead.
-    //
-    // FIXME: This is somewhat suboptimal, as there will be cases where adding
-    //        one to the maximum bit width will yield a larger-than-necessary
-    //        type. In general, we need to add an extra bit only if we can't
-    //        prove that the upper bit of the original type is equal to the
-    //        upper bit of the proposed smaller type. If these two bits are the
-    //        same (either zero or one) we know that sign-extending from the
-    //        smaller type will result in the same value. Here, since we can't
-    //        yet prove this, we are just making the proposed smaller type
-    //        larger to ensure correctness.
-    if (!IsKnownPositive)
-      ++MaxBitWidth;
-  }
-
-  // Round MaxBitWidth up to the next power-of-two.
-  if (!isPowerOf2_64(MaxBitWidth))
-    MaxBitWidth = NextPowerOf2(MaxBitWidth);
-
-  // If the maximum bit width we compute is less than the with of the roots'
-  // type, we can proceed with the narrowing. Otherwise, do nothing.
-  if (MaxBitWidth >= TreeRootIT->getBitWidth())
-    return;
-
-  // If we can truncate the root, we must collect additional values that might
-  // be demoted as a result. That is, those seeded by truncations we will
-  // modify.
-  while (!Roots.empty())
-    collectValuesToDemote(Roots.pop_back_val(), Expr, ToDemote, Roots);
-
-  // Finally, map the values we can demote to the maximum bit with we computed.
-  for (auto *Scalar : ToDemote)
-    MinBWs[Scalar] = std::make_pair(MaxBitWidth, !IsKnownPositive);
-}
-
 namespace {
 
 /// The Revectorizer Pass.
@@ -4831,8 +4561,6 @@ bool RevectorizerPass::vectorizeStoreChain(ArrayRef<Value *> Chain, BoUpSLP &R,
     R.buildTree(Operands);
     if (R.isTreeTinyAndNotFullyVectorizable())
       continue;
-
-    R.computeMinimumValueSizes();
 
     int Cost = R.getTreeCost();
 
@@ -5091,7 +4819,6 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
       if (R.isTreeTinyAndNotFullyVectorizable())
         continue;
 
-      R.computeMinimumValueSizes();
       int Cost = R.getTreeCost() - UserCost;
       CandidateFound = true;
       MinCost = std::min(MinCost, Cost);
@@ -5831,8 +5558,6 @@ public:
       }
       if (V.isTreeTinyAndNotFullyVectorizable())
         break;
-
-      V.computeMinimumValueSizes();
 
       // Estimate cost.
       int Cost =
