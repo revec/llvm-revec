@@ -182,6 +182,17 @@ static VectorType *getVectorType(Type *ElementTy, unsigned numElements) {
   return VectorType::get(ElementTy, numElements);
 }
 
+static unsigned getFusedSize(ArrayRef<Value *> VL) {
+  // Get the total number of elements in vectors contained in VL
+  unsigned numElements = 0;
+  for (Value *value : VL) {
+    Type *ty = value->getType();
+    assert((ty->isVectorTy()) && "VL in getFusedSize(VL) included a non-vector type");
+    numElements += ty->getVectorNumElements();
+  }
+  return numElements;
+}
+
 /// \returns true if all of the instructions in \p VL are in the same block or
 /// false otherwise.
 static bool allSameBlock(ArrayRef<Value *> VL) {
@@ -2069,6 +2080,7 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
     return ReuseShuffleCost + getGatherCost(VL);
   }
 
+  // TODO: Understand getSameOpcode -- does it need changes for vector values?
   InstructionsState S = getSameOpcode(VL);
   assert(S.Opcode && allSameType(VL) && allSameBlock(VL) && "Invalid VL");
   Instruction *VL0 = cast<Instruction>(S.OpValue);
@@ -2078,9 +2090,10 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
     case Instruction::PHI:
       return 0;
 
-#if 0
     case Instruction::ExtractValue:
     case Instruction::ExtractElement:
+      // TODO: Reenable this logic after understanding ReuseShuffleIndices
+#if 0
       if (NeedToShuffleReuses) {
         unsigned Idx = 0;
         for (unsigned I : E->ReuseShuffleIndices) {
@@ -2109,6 +2122,7 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
               TTI->getVectorInstrCost(Instruction::ExtractElement, VecTy, Idx);
         }
       }
+#endif
       if (canReuseExtract(VL, S.OpValue)) {
         int DeadCost = ReuseShuffleCost;
         for (unsigned i = 0, e = VL.size(); i < e; ++i) {
@@ -2125,6 +2139,7 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       }
       return ReuseShuffleCost + getGatherCost(VL);
 
+#if 0
     case Instruction::ZExt:
     case Instruction::SExt:
     case Instruction::FPToUI:
@@ -2163,21 +2178,35 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       return -1 * ScalarCost;
 #endif
     }
+#endif
+    /* Evaluate the cost of a fusion similar to:
+     * %a = icmp eq <n x i1> %c1, <n x ty> %A, %B
+     * %b = icmp eq <n x i1> %c2, <n x ty> %C, %D
+     *   ==>
+     * %ab = icmp eq <2n x i1> %c12, <2n x ty> %AC, %BD
+     * where VecTy is <2n x ty> and MaskTy is <2n x i1>
+     */
     case Instruction::FCmp:
     case Instruction::ICmp:
     case Instruction::Select: {
-      // Calculate the cost of this instruction.
+      // Get the type of the condition vector for narrow vector instructions
+      VectorType *NarrowMaskTy = VectorType::get(Builder.getInt1Ty(), VL[0]->getType()->getVectorNumElements());
+      int NarrowVectorCost = VL.size() *
+          TTI->getCmpSelInstrCost(S.Opcode, ScalarTy, NarrowMaskTy, VL0);
+
+      // TODO: Is this correct or needed?
       if (NeedToShuffleReuses) {
         ReuseShuffleCost -= (ReuseShuffleNumbers - VL.size()) *
-                            TTI->getCmpSelInstrCost(S.Opcode, ScalarTy,
-                                                    Builder.getInt1Ty(), VL0);
+                            TTI->getCmpSelInstrCost(S.Opcode, ScalarTy, NarrowMaskTy, VL0);
       }
-      VectorType *MaskTy = VectorType::get(Builder.getInt1Ty(), VL.size());
-      int ScalarCost = VecTy->getNumElements() *
-          TTI->getCmpSelInstrCost(S.Opcode, ScalarTy, Builder.getInt1Ty(), VL0);
-      int VecCost = TTI->getCmpSelInstrCost(S.Opcode, VecTy, MaskTy, VL0);
-      return ReuseShuffleCost + VecCost - ScalarCost;
+
+      // Get the type of the condition vector for the fused instruction
+      VectorType *MaskTy = VectorType::get(Builder.getInt1Ty(), getFusedSize(VL));
+      int FusedCost = TTI->getCmpSelInstrCost(S.Opcode, VecTy, MaskTy, VL0);
+
+      return ReuseShuffleCost + FusedCost - NarrowVectorCost;
     }
+#if 0
     case Instruction::Add:
     case Instruction::FAdd:
     case Instruction::Sub:
@@ -2299,14 +2328,15 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
                                            VecTy, alignment, 0, VL0);
       return ReuseShuffleCost + VecStCost - ScalarStCost;
     }
+#endif
     case Instruction::Call: {
       CallInst *CI = cast<CallInst>(VL0);
       Intrinsic::ID ID = getVectorIntrinsicIDForCall(CI, TLI);
 
       // Calculate the cost of the scalar and vector calls.
-      SmallVector<Type*, 4> ScalarTys;
-      for (unsigned op = 0, opc = CI->getNumArgOperands(); op!= opc; ++op)
-        ScalarTys.push_back(CI->getArgOperand(op)->getType());
+      SmallVector<Type*, 4> NarrowVecTys;
+      for (unsigned op = 0, opc = CI->getNumArgOperands(); op != opc; ++op)
+        NarrowVecTys.push_back(CI->getArgOperand(op)->getType());
 
       FastMathFlags FMF;
       if (auto *FPMO = dyn_cast<FPMathOperator>(CI))
@@ -2315,21 +2345,23 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       if (NeedToShuffleReuses) {
         ReuseShuffleCost -=
             (ReuseShuffleNumbers - VL.size()) *
-            TTI->getIntrinsicInstrCost(ID, ScalarTy, ScalarTys, FMF);
+            TTI->getIntrinsicInstrCost(ID, ScalarTy, NarrowVecTys, FMF);
       }
-      int ScalarCallCost = VecTy->getNumElements() *
-          TTI->getIntrinsicInstrCost(ID, ScalarTy, ScalarTys, FMF);
+
+      int NarrowVecCallCost = VL.size() *
+          TTI->getIntrinsicInstrCost(ID, ScalarTy, NarrowVecTys, FMF);
 
       SmallVector<Value *, 4> Args(CI->arg_operands());
-      int VecCallCost = TTI->getIntrinsicInstrCost(ID, CI->getType(), Args, FMF,
+      int FusedVecCallCost = TTI->getIntrinsicInstrCost(ID, CI->getType(), Args, FMF,
                                                    VecTy->getNumElements());
 
-      DEBUG(dbgs() << "Revec: Call cost "<< VecCallCost - ScalarCallCost
-            << " (" << VecCallCost  << "-" <<  ScalarCallCost << ")"
+      DEBUG(dbgs() << "Revec: Call cost "<< FusedVecCallCost - NarrowVecCallCost
+            << " (" << FusedVecCallCost  << "-" <<  NarrowVecCallCost << ")"
             << " for " << *CI << "\n");
 
-      return ReuseShuffleCost + VecCallCost - ScalarCallCost;
+      return ReuseShuffleCost + FusedVecCallCost - NarrowVecCallCost;
     }
+#if 0
     case Instruction::ShuffleVector: {
       TargetTransformInfo::OperandValueKind Op1VK =
           TargetTransformInfo::OK_AnyValue;
@@ -2567,6 +2599,7 @@ int BoUpSLP::getTreeCost() {
 
 int BoUpSLP::getGatherCost(Type *Ty,
                            const DenseSet<unsigned> &ShuffledIndices) {
+  // TODO: This needs to be updated for tree gathers
   int Cost = 0;
   for (unsigned i = 0, e = cast<VectorType>(Ty)->getNumElements(); i < e; ++i)
     if (!ShuffledIndices.count(i))
@@ -2582,6 +2615,7 @@ int BoUpSLP::getGatherCost(ArrayRef<Value *> VL) {
   if (StoreInst *SI = dyn_cast<StoreInst>(VL[0]))
     NarrowVectorTy = SI->getValueOperand()->getType();
   VectorType *VecTy = getVectorType(NarrowVectorTy, VL.size());
+
   // Find the cost of inserting/extracting values from the vector.
   // Check if the same elements are inserted several times and count them as
   // shuffle candidates.
