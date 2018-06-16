@@ -1,11 +1,11 @@
-//===- Revectorizer.cpp - A bottom up SLP Vectorizer for vector fusion -----===//
+//===- Revectorizer.cpp - A bottom up SLP-style Vectorizer for vector fusion -----===//
 //
 //                     The LLVM Compiler Infrastructure
 //
 // This file is distributed under the University of Illinois Open Source
 // License. See LICENSE.TXT for details.
 //
-//===----------------------------------------------------------------------===//
+//===-----------------------------------------------------------------------------===//
 //
 // This pass implements the Bottom Up SLP vectorizer. It detects consecutive
 // stores that can be put together into vector-stores. Next, it attempts to
@@ -15,7 +15,7 @@
 // The pass is inspired by the work described in the paper:
 //  "Loop-Aware SLP in GCC" by Ira Rosen, Dorit Nuzman, Ayal Zaks.
 //
-//===----------------------------------------------------------------------===//
+//===-----------------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Vectorize/Revectorizer/Revectorizer.h"
 #include "llvm/Transforms/Vectorize/Revectorizer/IntrinsicConversion.h"
@@ -2035,7 +2035,6 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
     ElementTy = CI->getOperand(0)->getType();
 
   VectorType *VecTy = getVectorType(ElementTy, VL.size());
-  Type *ScalarTy = VecTy->getElementType();
 
   // TODO: Update cost model to handle vector-containing VL
   unsigned ReuseShuffleNumbers = E->ReuseShuffleIndices.size();
@@ -2091,9 +2090,9 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       return 0;
 
     case Instruction::ExtractValue:
-    case Instruction::ExtractElement:
-      // TODO: Reenable this logic after understanding ReuseShuffleIndices
-#if 0
+    case Instruction::ExtractElement: {
+      // TODO: Verify costs are not too large for insert/extract sequences that will be bundled into a shuffle
+      // TODO: What is this NeedToShuffleReuses check doing?
       if (NeedToShuffleReuses) {
         unsigned Idx = 0;
         for (unsigned I : E->ReuseShuffleIndices) {
@@ -2122,7 +2121,7 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
               TTI->getVectorInstrCost(Instruction::ExtractElement, VecTy, Idx);
         }
       }
-#endif
+
       if (canReuseExtract(VL, S.OpValue)) {
         int DeadCost = ReuseShuffleCost;
         for (unsigned i = 0, e = VL.size(); i < e; ++i) {
@@ -2138,8 +2137,7 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
         return DeadCost;
       }
       return ReuseShuffleCost + getGatherCost(VL);
-
-#if 0
+    }
     case Instruction::ZExt:
     case Instruction::SExt:
     case Instruction::FPToUI:
@@ -2156,29 +2154,20 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       if (NeedToShuffleReuses) {
         ReuseShuffleCost -=
             (ReuseShuffleNumbers - VL.size()) *
-            TTI->getCastInstrCost(S.Opcode, ScalarTy, SrcTy, VL0);
+            TTI->getCastInstrCost(S.Opcode, ElementTy, SrcTy, VL0);
       }
 
       // Calculate the cost of this instruction.
-      int ScalarCost = VL.size() * TTI->getCastInstrCost(VL0->getOpcode(),
-                                                         VL0->getType(), SrcTy, VL0);
+      int NarrowVecCost = VL.size() *
+          TTI->getCastInstrCost(VL0->getOpcode(), VL0->getType(), SrcTy, VL0);
 
-      // TODO(ajayjain): Should VecCost be included?
-#if 0
-      VectorType *SrcVecTy = getVectorType(SrcTy, VL.size());
-      int VecCost = 0;
-      // Check if the values are candidates to demote.
-      // if (!MinBWs.count(VL0) || VecTy != SrcVecTy) {
-        VecCost = ReuseShuffleCost +
-                  TTI->getCastInstrCost(VL0->getOpcode(), VecTy, SrcVecTy, VL0);
-      // }
+      // The revectorizer pass does not demote the bitwidth of value elements,
+      // always add this cost
+      VectorType *FusedSrcVecTy = getVectorType(SrcTy, VL.size());
+      int FusedVecCost = TTI->getCastInstrCost(VL0->getOpcode(), VecTy, FusedSrcVecTy, VL0);
 
-      return VecCost - ScalarCost;
-#else
-      return -1 * ScalarCost;
-#endif
+      return ReuseShuffleCost + FusedVecCost - NarrowVecCost;
     }
-#endif
     /* Evaluate the cost of a fusion similar to:
      * %a = icmp eq <n x i1> %c1, <n x ty> %A, %B
      * %b = icmp eq <n x i1> %c2, <n x ty> %C, %D
@@ -2190,14 +2179,15 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
     case Instruction::ICmp:
     case Instruction::Select: {
       // Get the type of the condition vector for narrow vector instructions
+      // TODO: What is the difference between VL[0] and VL0?
       VectorType *NarrowMaskTy = VectorType::get(Builder.getInt1Ty(), VL[0]->getType()->getVectorNumElements());
       int NarrowVectorCost = VL.size() *
-          TTI->getCmpSelInstrCost(S.Opcode, ScalarTy, NarrowMaskTy, VL0);
+          TTI->getCmpSelInstrCost(S.Opcode, ElementTy, NarrowMaskTy, VL0);
 
       // TODO: Is this correct or needed?
       if (NeedToShuffleReuses) {
         ReuseShuffleCost -= (ReuseShuffleNumbers - VL.size()) *
-                            TTI->getCmpSelInstrCost(S.Opcode, ScalarTy, NarrowMaskTy, VL0);
+                            TTI->getCmpSelInstrCost(S.Opcode, ElementTy, NarrowMaskTy, VL0);
       }
 
       // Get the type of the condition vector for the fused instruction
@@ -2206,7 +2196,6 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
 
       return ReuseShuffleCost + FusedCost - NarrowVectorCost;
     }
-#if 0
     case Instruction::Add:
     case Instruction::FAdd:
     case Instruction::Sub:
@@ -2227,133 +2216,144 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
     case Instruction::Xor: {
       // Certain instructions can be cheaper to vectorize if they have a
       // constant second vector operand.
-      TargetTransformInfo::OperandValueKind Op1VK =
+      const TargetTransformInfo::OperandValueKind Op1VK =
           TargetTransformInfo::OK_AnyValue;
       TargetTransformInfo::OperandValueKind Op2VK =
           TargetTransformInfo::OK_UniformConstantValue;
-      TargetTransformInfo::OperandValueProperties Op1VP =
+      const TargetTransformInfo::OperandValueProperties Op1VP =
           TargetTransformInfo::OP_None;
-      TargetTransformInfo::OperandValueProperties Op2VP =
+      const TargetTransformInfo::OperandValueProperties Op2VP =
           TargetTransformInfo::OP_None;
 
-      // If all operands are exactly the same ConstantInt then set the
+      // If all parallel operands are exactly the same ConstantVector then set the
       // operand kind to OK_UniformConstantValue.
       // If instead not all operands are constants, then set the operand kind
       // to OK_AnyValue. If all operands are constants but not the same,
       // then set the operand kind to OK_NonUniformConstantValue.
-      ConstantInt *CInt = nullptr;
+      ConstantVector *CVec = nullptr;
       for (unsigned i = 0; i < VL.size(); ++i) {
         const Instruction *I = cast<Instruction>(VL[i]);
-        if (!isa<ConstantInt>(I->getOperand(1))) {
+        if (!isa<ConstantVector>(I->getOperand(1))) {
           Op2VK = TargetTransformInfo::OK_AnyValue;
           break;
         }
         if (i == 0) {
-          CInt = cast<ConstantInt>(I->getOperand(1));
+          CVec = cast<ConstantVector>(I->getOperand(1));
           continue;
         }
         if (Op2VK == TargetTransformInfo::OK_UniformConstantValue &&
-            CInt != cast<ConstantInt>(I->getOperand(1)))
+            CVec != cast<ConstantVector>(I->getOperand(1)))
           Op2VK = TargetTransformInfo::OK_NonUniformConstantValue;
       }
-      // FIXME: Currently cost of model modification for division by power of
-      // 2 is handled for X86 and AArch64. Add support for other targets.
-      if (Op2VK == TargetTransformInfo::OK_UniformConstantValue && CInt &&
-          CInt->getValue().isPowerOf2())
-        Op2VP = TargetTransformInfo::OP_PowerOf2;
 
       SmallVector<const Value *, 4> Operands(VL0->operand_values());
       if (NeedToShuffleReuses) {
         ReuseShuffleCost -=
             (ReuseShuffleNumbers - VL.size()) *
-            TTI->getArithmeticInstrCost(S.Opcode, ScalarTy, Op1VK, Op2VK, Op1VP,
+            TTI->getArithmeticInstrCost(S.Opcode, ElementTy, Op1VK, Op2VK, Op1VP,
                                         Op2VP, Operands);
       }
-      int ScalarCost =
-          VecTy->getNumElements() *
-          TTI->getArithmeticInstrCost(S.Opcode, ScalarTy, Op1VK, Op2VK, Op1VP,
+
+      int NarrowVecCost = VL.size() *
+          TTI->getArithmeticInstrCost(S.Opcode, ElementTy, Op1VK, Op2VK, Op1VP,
                                       Op2VP, Operands);
-      int VecCost = TTI->getArithmeticInstrCost(S.Opcode, VecTy, Op1VK, Op2VK,
+      int FusedVecCost = TTI->getArithmeticInstrCost(S.Opcode, VecTy, Op1VK, Op2VK,
                                                 Op1VP, Op2VP, Operands);
-      return ReuseShuffleCost + VecCost - ScalarCost;
+      return ReuseShuffleCost + FusedVecCost - NarrowVecCost;
     }
     case Instruction::GetElementPtr: {
-      TargetTransformInfo::OperandValueKind Op1VK =
+      const TargetTransformInfo::OperandValueKind Op1VK =
           TargetTransformInfo::OK_AnyValue;
-      TargetTransformInfo::OperandValueKind Op2VK =
+      const TargetTransformInfo::OperandValueKind Op2VK =
           TargetTransformInfo::OK_UniformConstantValue;
 
       if (NeedToShuffleReuses) {
         ReuseShuffleCost -= (ReuseShuffleNumbers - VL.size()) *
                             TTI->getArithmeticInstrCost(Instruction::Add,
-                                                        ScalarTy, Op1VK, Op2VK);
+                                                        ElementTy, Op1VK, Op2VK);
       }
-      int ScalarCost =
-          VecTy->getNumElements() *
-          TTI->getArithmeticInstrCost(Instruction::Add, ScalarTy, Op1VK, Op2VK);
-      int VecCost =
-          TTI->getArithmeticInstrCost(Instruction::Add, VecTy, Op1VK, Op2VK);
 
-      return ReuseShuffleCost + VecCost - ScalarCost;
+      int NarrowVecCost = VL.size() *
+          TTI->getArithmeticInstrCost(Instruction::Add, ElementTy, Op1VK, Op2VK);
+      int FusedVecCost =
+          TTI->getArithmeticInstrCost(Instruction::Add, VecTy, Op1VK, Op2VK);
+      return ReuseShuffleCost + FusedVecCost - NarrowVecCost;
     }
     case Instruction::Load: {
       // Cost of wide load - cost of scalar loads.
       unsigned alignment = dyn_cast<LoadInst>(VL0)->getAlignment();
       if (NeedToShuffleReuses) {
         ReuseShuffleCost -= (ReuseShuffleNumbers - VL.size()) *
-                            TTI->getMemoryOpCost(Instruction::Load, ScalarTy,
+                            TTI->getMemoryOpCost(Instruction::Load, ElementTy,
                                                  alignment, 0, VL0);
       }
-      int ScalarLdCost = VecTy->getNumElements() *
-          TTI->getMemoryOpCost(Instruction::Load, ScalarTy, alignment, 0, VL0);
-      int VecLdCost = TTI->getMemoryOpCost(Instruction::Load,
-                                           VecTy, alignment, 0, VL0);
+
+      int NarrowVecLdCost = VL.size() *
+          TTI->getMemoryOpCost(Instruction::Load, ElementTy, alignment, 0, VL0);
+      int FusedVecLdCost =
+          TTI->getMemoryOpCost(Instruction::Load, VecTy, alignment, 0, VL0);
       if (!isConsecutiveAccess(VL[0], VL[1], *DL, *SE)) {
-        VecLdCost += TTI->getShuffleCost(
+        FusedVecLdCost += TTI->getShuffleCost(
             TargetTransformInfo::SK_PermuteSingleSrc, VecTy);
       }
-      return ReuseShuffleCost + VecLdCost - ScalarLdCost;
+      return ReuseShuffleCost + FusedVecLdCost - NarrowVecLdCost;
     }
     case Instruction::Store: {
       // We know that we can merge the stores. Calculate the cost.
       unsigned alignment = dyn_cast<StoreInst>(VL0)->getAlignment();
       if (NeedToShuffleReuses) {
         ReuseShuffleCost -= (ReuseShuffleNumbers - VL.size()) *
-                            TTI->getMemoryOpCost(Instruction::Store, ScalarTy,
+                            TTI->getMemoryOpCost(Instruction::Store, ElementTy,
                                                  alignment, 0, VL0);
       }
-      int ScalarStCost = VecTy->getNumElements() *
-          TTI->getMemoryOpCost(Instruction::Store, ScalarTy, alignment, 0, VL0);
-      int VecStCost = TTI->getMemoryOpCost(Instruction::Store,
-                                           VecTy, alignment, 0, VL0);
-      return ReuseShuffleCost + VecStCost - ScalarStCost;
+
+      int NarrowVecStCost = VL.size() *
+          TTI->getMemoryOpCost(Instruction::Store, ElementTy, alignment, 0, VL0);
+      int FusedVecStCost = TTI->getMemoryOpCost(Instruction::Store,
+                                                VecTy, alignment, 0, VL0);
+      return ReuseShuffleCost + FusedVecStCost - NarrowVecStCost;
     }
-#endif
     case Instruction::Call: {
+      // Calculate the cost of the scalar and vector calls.
       CallInst *CI = cast<CallInst>(VL0);
       Intrinsic::ID ID = getVectorIntrinsicIDForCall(CI, TLI);
 
-      // Calculate the cost of the scalar and vector calls.
-      SmallVector<Type*, 4> NarrowVecTys;
-      for (unsigned op = 0, opc = CI->getNumArgOperands(); op != opc; ++op)
-        NarrowVecTys.push_back(CI->getArgOperand(op)->getType());
+      DEBUG(dbgs() << "Revec: Getting cost of call bundle" << "\n");
+      DEBUG(dbgs() << "Revec:     Starts with: " << *CI << "\n");
+      DEBUG(dbgs() << "Revec:     ElementTy: " << *ElementTy << "\n");
+      DEBUG(dbgs() << "Revec:     VecTy: " << *VecTy << "\n");
 
-      FastMathFlags FMF;
+      SmallVector<Type*, 4> NarrowCallArgTys;
+      for (unsigned op = 0, opc = CI->getNumArgOperands(); op != opc; ++op)
+        NarrowCallArgTys.push_back(CI->getArgOperand(op)->getType());
+
+            FastMathFlags FMF;
       if (auto *FPMO = dyn_cast<FPMathOperator>(CI))
         FMF = FPMO->getFastMathFlags();
 
       if (NeedToShuffleReuses) {
         ReuseShuffleCost -=
             (ReuseShuffleNumbers - VL.size()) *
-            TTI->getIntrinsicInstrCost(ID, ScalarTy, NarrowVecTys, FMF);
+            TTI->getIntrinsicInstrCost(ID, ElementTy, NarrowCallArgTys, FMF,
+                                       ElementTy->getVectorNumElements());
       }
 
       int NarrowVecCallCost = VL.size() *
-          TTI->getIntrinsicInstrCost(ID, ScalarTy, NarrowVecTys, FMF);
+          TTI->getIntrinsicInstrCost(ID, ElementTy, NarrowCallArgTys, FMF,
+                                     ElementTy->getVectorNumElements());
 
-      SmallVector<Value *, 4> Args(CI->arg_operands());
-      int FusedVecCallCost = TTI->getIntrinsicInstrCost(ID, CI->getType(), Args, FMF,
-                                                   VecTy->getNumElements());
+      // Find widened vector return and argument types for this intrinsic
+      Type *FusedRetTy = getVectorType(CI->getType(), VL.size());
+
+      SmallVector<Type *, 4> FusedCallArgTys;
+      for (unsigned op = 0, opc = CI->getNumArgOperands(); op != opc; ++op) {
+        // Assume vertical concatenation of arguments in this bundle
+        Type *NarrowArgTy = CI->getArgOperand(op)->getType();
+        Type *FusedArgTy = getVectorType(NarrowArgTy, VL.size());
+        FusedCallArgTys.push_back(FusedArgTy);
+      }
+
+      int FusedVecCallCost = TTI->getIntrinsicInstrCost(ID, FusedRetTy, FusedCallArgTys, FMF);
 
       DEBUG(dbgs() << "Revec: Call cost "<< FusedVecCallCost - NarrowVecCallCost
             << " (" << FusedVecCallCost  << "-" <<  NarrowVecCallCost << ")"
@@ -2361,55 +2361,64 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
 
       return ReuseShuffleCost + FusedVecCallCost - NarrowVecCallCost;
     }
-#if 0
     case Instruction::ShuffleVector: {
-      TargetTransformInfo::OperandValueKind Op1VK =
+      const TargetTransformInfo::OperandValueKind Op1VK =
           TargetTransformInfo::OK_AnyValue;
-      TargetTransformInfo::OperandValueKind Op2VK =
+      const TargetTransformInfo::OperandValueKind Op2VK =
           TargetTransformInfo::OK_AnyValue;
-      int ScalarCost = 0;
+
       if (NeedToShuffleReuses) {
         for (unsigned Idx : E->ReuseShuffleIndices) {
           Instruction *I = cast<Instruction>(VL[Idx]);
           if (!I)
             continue;
           ReuseShuffleCost -= TTI->getArithmeticInstrCost(
-              I->getOpcode(), ScalarTy, Op1VK, Op2VK);
+              I->getOpcode(), ElementTy, Op1VK, Op2VK);
         }
         for (Value *V : VL) {
           Instruction *I = cast<Instruction>(V);
           if (!I)
             continue;
           ReuseShuffleCost += TTI->getArithmeticInstrCost(
-              I->getOpcode(), ScalarTy, Op1VK, Op2VK);
+              I->getOpcode(), ElementTy, Op1VK, Op2VK);
         }
       }
-      int VecCost = 0;
+
+      int NarrowVecCost = 0;
+      DEBUG(dbgs() << "Revec: Getting cost of shuffle vector bundle starting with " << VL[0] << "\n");
       for (Value *i : VL) {
         Instruction *I = cast<Instruction>(i);
         if (!I)
           break;
-        ScalarCost +=
-            TTI->getArithmeticInstrCost(I->getOpcode(), ScalarTy, Op1VK, Op2VK);
+
+        DEBUG(dbgs() << "Revec:   " << I << "\n");
+
+        NarrowVecCost +=
+            TTI->getArithmeticInstrCost(I->getOpcode(), ElementTy, Op1VK, Op2VK);
       }
-      // VecCost is equal to sum of the cost of creating 2 vectors
+
+      // ????: When encountering a shufflevector bundle, do we assume the outputs of
+      // the shuffles will be gathered with a shuffle?
+
+      // TODO: What if the bundle contains more than 2 shuffles?
+      // TODO: Update after the shuffle search is implemented. What heuristic should be used then?
+
+      // FusedVecCost is equal to sum of the cost of creating 2 vectors
       // and the cost of creating shuffle.
-      Instruction *I0 = cast<Instruction>(VL[0]);
-      VecCost =
-          TTI->getArithmeticInstrCost(I0->getOpcode(), VecTy, Op1VK, Op2VK);
-      Instruction *I1 = cast<Instruction>(VL[1]);
-      VecCost +=
-          TTI->getArithmeticInstrCost(I1->getOpcode(), VecTy, Op1VK, Op2VK);
-      VecCost +=
+      const unsigned I0_opcode = cast<Instruction>(VL[0])->getOpcode();
+      const unsigned I1_opcode = cast<Instruction>(VL[1])->getOpcode();
+
+      const int FusedVecCost =
+          TTI->getArithmeticInstrCost(I0_opcode, VecTy, Op1VK, Op2VK) +
+          TTI->getArithmeticInstrCost(I1_opcode, VecTy, Op1VK, Op2VK) +
           TTI->getShuffleCost(TargetTransformInfo::SK_Alternate, VecTy, 0);
-      return ReuseShuffleCost + VecCost - ScalarCost;
+
+      return ReuseShuffleCost + FusedVecCost - NarrowVecCost;
     }
     default:
-      llvm_unreachable("Unknown instruction");
-#else
-    default:
+      // TODO: Restore this commented line when all cases are reenabled
+      // llvm_unreachable("Unknown instruction");
       return -1;
-#endif
   }
 }
 
@@ -2601,7 +2610,7 @@ int BoUpSLP::getGatherCost(Type *Ty,
                            const DenseSet<unsigned> &ShuffledIndices) {
   // TODO: This needs to be updated for tree gathers
   int Cost = 0;
-  for (unsigned i = 0, e = cast<VectorType>(Ty)->getNumElements(); i < e; ++i)
+  for (unsigned i = 0, e = Ty->getVectorNumElements(); i < e; ++i)
     if (!ShuffledIndices.count(i))
       Cost += TTI->getVectorInstrCost(Instruction::InsertElement, Ty, i);
   if (!ShuffledIndices.empty())
