@@ -2952,8 +2952,9 @@ void BoUpSLP::RecordExternalUse(Value *ElementVector, llvm::User *User) {
 
 Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
   unsigned size = VL.size();
+  // TODO: Support values lists of length longer than 2
 #if 1
-  assert((size == 2) && "Gathering value list that is not of length two");
+  assert((size == 2u) && "Gathering value list that is not of length two");
 
   DEBUG(dbgs() << "Revec: Gathering a value list of length 2:\n");
   DEBUG(dbgs() << "Revec:    " << *VL[0] << "\n");
@@ -2984,13 +2985,15 @@ Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
 Value *BoUpSLP::Gather_two(Value *L, Value *R) {
   SmallVector<uint32_t, 32> mask;
 
+  assert((L->getType() == R->getType()) && "Gathering values of different types");
+
   unsigned leftElems = L->getType()->getVectorNumElements();
   unsigned rightElems = R->getType()->getVectorNumElements();
 
   assert((leftElems > 0 && leftElems == rightElems) && "Bad sizes for gathered operands");
 
-  for (uint32_t i = 0; i < leftElems + rightElems; ++i) {
-    mask.emplace_back(i);
+  for (unsigned i = 0; i < leftElems + rightElems; ++i) {
+    mask.emplace_back(static_cast<uint32_t>(i));
   }
 
   return Builder.CreateShuffleVector(L, R, mask);
