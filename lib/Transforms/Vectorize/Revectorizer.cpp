@@ -147,7 +147,11 @@ static cl::opt<unsigned> MinTreeSize(
 
 static cl::opt<bool>
     WriteRevecTree("write-revec-tree", cl::Hidden,
-                cl::desc("Display the SLP trees with Graphviz"));
+                cl::desc("Write out Revectorization SLP trees to files in /tmp"));
+
+static cl::opt<bool>
+    ForceRevec("revec-force", cl::Hidden,
+            cl::desc("Vectorize the revec tree regardless of the computed cost"));
 
 // Limit the number of alias checks. The limit is chosen so that
 // it has no negative effect on the llvm benchmarks.
@@ -4833,7 +4837,7 @@ bool RevectorizerPass::vectorizeStoreChain(ArrayRef<Value *> Chain, BoUpSLP &R,
     int Cost = R.getTreeCost();
 
     DEBUG(dbgs() << "Revec: Found cost=" << Cost << " for VF=" << VF << "\n");
-    if (Cost < -RevecCostThreshold) {
+    if (Cost < -RevecCostThreshold || ForceRevec) {
       DEBUG(dbgs() << "Revec: Decided to vectorize cost=" << Cost << "\n");
 
       using namespace ore;
@@ -5092,9 +5096,9 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
       CandidateFound = true;
       MinCost = std::min(MinCost, Cost);
 
-      if (Cost < -RevecCostThreshold) {
-        DEBUG(dbgs() << "Revec: Vectorizing list at cost:" << Cost << ".\n");
-        R.getORE()->emit(OptimizationRemark(SV_NAME, "VectorizedList",
+      if (Cost < -RevecCostThreshold || ForceRevec) {
+        DEBUG(dbgs() << "Revec: Revectorizing list at cost:" << Cost << ".\n");
+        R.getORE()->emit(OptimizationRemark(SV_NAME, "RevectorizedList",
                                                     cast<Instruction>(Ops[0]))
                                  << "Revec vectorized with cost " << ore::NV("Cost", Cost)
                                  << " and with tree size "
@@ -5113,7 +5117,7 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
     R.getORE()->emit([&]() {
         return OptimizationRemarkMissed(
                    SV_NAME, "NotBeneficial",  I0)
-               << "List vectorization was possible but not beneficial with cost "
+               << "List revectorization was possible but not beneficial with cost "
                << ore::NV("Cost", MinCost) << " >= "
                << ore::NV("Treshold", -RevecCostThreshold);
     });
@@ -5121,7 +5125,7 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
     R.getORE()->emit([&]() {
         return OptimizationRemarkMissed(
                    SV_NAME, "NotPossible", I0)
-               << "Cannot SLP vectorize list: vectorization was impossible"
+               << "Cannot revectorize list: vectorization was impossible"
                << " with available vectorization factors";
     });
   }
@@ -5833,11 +5837,11 @@ public:
       // Estimate cost.
       int Cost =
           V.getTreeCost() + getReductionCost(TTI, ReducedVals[i], ReduxWidth);
-      if (Cost >= -RevecCostThreshold) {
+      if (Cost >= -RevecCostThreshold && !ForceRevec) {
           V.getORE()->emit([&]() {
               return OptimizationRemarkMissed(
-                         SV_NAME, "HorSLPNotBeneficial", cast<Instruction>(VL[0]))
-                     << "Vectorizing horizontal reduction is possible"
+                         SV_NAME, "HorRevecNotBeneficial", cast<Instruction>(VL[0]))
+                     << "Revectorizing horizontal reduction is possible"
                      << "but not beneficial with cost "
                      << ore::NV("Cost", Cost) << " and threshold "
                      << ore::NV("Threshold", -RevecCostThreshold);
@@ -5849,8 +5853,8 @@ public:
                    << ". (HorRdx)\n");
       V.getORE()->emit([&]() {
           return OptimizationRemark(
-                     SV_NAME, "VectorizedHorizontalReduction", cast<Instruction>(VL[0]))
-          << "Vectorized horizontal reduction with cost "
+                     SV_NAME, "RevectorizedHorizontalReduction", cast<Instruction>(VL[0]))
+          << "Revectorized horizontal reduction with cost "
           << ore::NV("Cost", Cost) << " and with tree size "
           << ore::NV("TreeSize", V.getTreeSize());
       });
