@@ -1434,6 +1434,7 @@ void BoUpSLP::buildTree(ArrayRef<Value *> Roots,
         // Skip in-tree scalars that become vectors
         if (TreeEntry *UseEntry = getTreeEntry(U)) {
           Value *UseScalar = UseEntry->Scalars[0];
+          // FIXME: Is pulling out of Lane 0 correct for revectorization?
           // Some in-tree scalars will remain as scalar in vectorized
           // instructions. If that is the case, the one in Lane 0 will
           // be used.
@@ -1450,8 +1451,8 @@ void BoUpSLP::buildTree(ArrayRef<Value *> Roots,
         if (is_contained(UserIgnoreList, UserInst))
           continue;
 
-        DEBUG(dbgs() << "Revec: Need to extract:" << *U << " from lane " <<
-              Lane << " from " << *narrowVec << ".\n");
+        DEBUG(dbgs() << "Revec: Need to extract:" << *narrowVec << " from lane " <<
+              Lane << " for User " << *U << ".\n");
         ExternalUses.push_back(ExternalUser(narrowVec, U, FoundLane));
       }
     }
@@ -1461,6 +1462,22 @@ void BoUpSLP::buildTree(ArrayRef<Value *> Roots,
 void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
                             int UserTreeIdx) {
   assert((allConstant(VL) || allSameType(VL)) && "Invalid types!");
+
+  // Ensure that all values are narorw vectors
+  for (Value *val : VL) {
+    Type *Ty = val->getType();
+    if (!isValidElementType(Ty)) {
+      DEBUG(dbgs() << "Revec: This bundle has invalid element type: " << *Ty << "\n");
+      newTreeEntry(VL, false, UserTreeIdx);
+      return;
+    }
+
+    if (!isNarrowVectorType(Ty)) {
+      DEBUG(dbgs() << "Revec: This bundle has non-narrow element type: " << *Ty << "\n");
+      newTreeEntry(VL, false, UserTreeIdx);
+      return;
+    }
+  }
 
   InstructionsState S = getSameOpcode(VL);
   if (Depth == RecursionMaxDepth) {
@@ -1584,22 +1601,6 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
     return;
   }
   DEBUG(dbgs() << "Revec: We are able to schedule this bundle.\n");
-
-  // Ensure that all values are narorw vectors
-  for (Value *val : VL) {
-    Type *Ty = val->getType();
-    if (!isValidElementType(Ty)) {
-      DEBUG(dbgs() << "Revec: This bundle has invalid element type: " << *Ty << "\n");
-      newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
-      return;
-    }
-
-    if (!isNarrowVectorType(Ty)) {
-      DEBUG(dbgs() << "Revec: This bundle has non-narrow element type: " << *Ty << "\n");
-      newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
-      return;
-    }
-  }
 
   unsigned ShuffleOrOp = S.IsAltShuffle ?
                 (unsigned) Instruction::ShuffleVector : S.Opcode;
@@ -2089,8 +2090,10 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
   }
   // TODO: Check that this gather cost is not too aggressive
   if (E->NeedToGather) {
-    if (allConstant(VL))
+    if (allConstant(VL)) {
+      DEBUG(dbgs() << "Revec: Gather all constant VL, 0 cost entry\n");
       return 0;
+    }
 
     if (isSplat(VL)) {
       int splatCost = 0;
@@ -2098,6 +2101,7 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
         int startIndex = i * ElementTy->getVectorNumElements();
         splatCost += TTI->getShuffleCost(TargetTransformInfo::SK_InsertSubvector, VecTy, startIndex, ElementTy);
       }
+      DEBUG(dbgs() << "Revec: Gather splat VL, cost " << ReuseShuffleCost << " + " << splatCost << "\n");
       return ReuseShuffleCost + splatCost;
     }
 
@@ -2107,7 +2111,9 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
     }
 
     // TODO: Update getGatherCost
-    return ReuseShuffleCost + getGatherCost(VL);
+    int GatherCost = getGatherCost(VL);
+    DEBUG(dbgs() << "Revec: Gather VL, cost " << ReuseShuffleCost << " + " << GatherCost << "\n");
+    return ReuseShuffleCost + GatherCost;
   }
 
   InstructionsState S = getSameOpcode(VL);
@@ -2169,7 +2175,7 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       Type *narrowMaskTy = (ShuffleOrOp == Instruction::Select)
         // Select instructions have a condition vector as an operand
         ? VL0->getOperand(0)->getType()
-        // Create a mask FCmp and ICmp instructions, as there is no condition vector
+        // Create a mask for FCmp and ICmp instructions, as there is no condition vector
         : VectorType::get(Builder.getInt1Ty(), VL0->getType()->getVectorNumElements());
 
       int NarrowVecCost = VL.size() *
@@ -2185,6 +2191,13 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       // Get the type of the condition vector for the fused instruction
       VectorType *wideMaskTy = VectorType::get(Builder.getInt1Ty(), getFusedSize(VL));
       int FusedVecCost = TTI->getCmpSelInstrCost(S.Opcode, VecTy, wideMaskTy, VL0);
+
+      DEBUG(dbgs() << "Revec: FCmp/ICmp/Select cost " << ReuseShuffleCost + FusedVecCost - NarrowVecCost
+            << " (" << ReuseShuffleCost << " + " << FusedVecCost  << " - " << NarrowVecCost << "). Bundle:\n");
+#ifndef NDEBUG
+      for (Value *val : VL)
+          DEBUG(dbgs() << "Revec:    " << *val << "\n");
+#endif
 
       return ReuseShuffleCost + FusedVecCost - NarrowVecCost;
     }
@@ -2358,7 +2371,7 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       int FusedVecCallCost =
           TTI->getIntrinsicInstrCost(alt, wideReturnTy, WideArgTys, FMF);
 
-      DEBUG(dbgs() << "Revec: Call cost "<< ReuseShuffleCost + FusedVecCallCost - NarrowVecCallCost
+      DEBUG(dbgs() << "Revec: Call cost " << ReuseShuffleCost + FusedVecCallCost - NarrowVecCallCost
             << " (" << ReuseShuffleCost << " + " << FusedVecCallCost  << " - " <<  NarrowVecCallCost << ")"
             << " for " << *CI << "\n");
 
@@ -3121,7 +3134,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
 			dbgs() << "\n";
 		}
 	);
-	DEBUG(dbgs() << "  Revec: Need to gather: " << E->NeedToGather << "\n");
+	DEBUG(dbgs() << "  Revec: Need to gather: " << (E->NeedToGather ? "yes" : "no") << "\n");
 
   bool NeedToShuffleReuses = !E->ReuseShuffleIndices.empty();
 
@@ -3619,86 +3632,104 @@ BoUpSLP::vectorizeTree(ExtraValueToDebugLocsMap &ExternallyUsedValues) {
 
   // Extract all of the elements with the external uses.
   for (const auto &ExternalUse : ExternalUses) {
-    Value *Scalar = ExternalUse.Scalar;
+    Value *narrowVec = ExternalUse.Scalar;
+    VectorType *narrowVecTy = cast<VectorType>(narrowVec->getType());
     llvm::User *User = ExternalUse.User;
 
     // Skip users that we already RAUW. This happens when one instruction
     // has multiple uses of the same value.
-    if (User && !is_contained(Scalar->users(), User))
+    if (User && !is_contained(narrowVec->users(), User))
       continue;
-    TreeEntry *E = getTreeEntry(Scalar);
-    assert(E && "Invalid scalar");
+    TreeEntry *E = getTreeEntry(narrowVec);
+    assert(E && "Invalid narrow vector to be extracted");
     assert(!E->NeedToGather && "Extracting from a gather list");
 
-    Value *Vec = E->VectorizedValue;
-    assert(Vec && "Can't find vectorizable value");
+    Value *wideVec = E->VectorizedValue;
+    VectorType *wideVecTy = cast<VectorType>(wideVec->getType());
+    assert(wideVec && "Can't find vectorizable value");
 
-    Value *Lane = Builder.getInt32(ExternalUse.Lane);
-    // If User == nullptr, the Scalar is used as extra arg. Generate
-    // ExtractElement instruction and update the record for this scalar in
+    // If User == nullptr, the narrowVec is used as extra arg. Generate
+    // ExtractElement instruction and update the record for this narrow vector in
     // ExternallyUsedValues.
     if (!User) {
-      assert(ExternallyUsedValues.count(Scalar) &&
-             "Scalar with nullptr as an external user must be registered in "
+      assert(ExternallyUsedValues.count(narrowVec) &&
+             "Narrow vector with nullptr as an external user must be registered in "
              "ExternallyUsedValues map");
-      if (auto *VecI = dyn_cast<Instruction>(Vec)) {
-        Builder.SetInsertPoint(VecI->getParent(),
-                               std::next(VecI->getIterator()));
+      if (auto *wideVecI = dyn_cast<Instruction>(wideVec)) {
+        Builder.SetInsertPoint(wideVecI->getParent(),
+                               std::next(wideVecI->getIterator()));
       } else {
         Builder.SetInsertPoint(&F->getEntryBlock().front());
       }
-      Value *Ex = Builder.CreateExtractElement(Vec, Lane);
-      CSEBlocks.insert(cast<Instruction>(Scalar)->getParent());
-      auto &Locs = ExternallyUsedValues[Scalar];
+
+      // FIXME: Can the element type of the vectorized value differ from that of the narrow value?
+      //        If so, bitwidths could be used to still handle the extraction.
+      assert((narrowVecTy->getElementType() == wideVecTy->getElementType())
+             && "Narrow vector to be extracted and vectorized value have differing element types");
+
+      // Extract narrow vector with shuffle
+      SmallVector<uint32_t, 16> Mask;
+      for (unsigned i = 0, NumToExtract = narrowVecTy->getNumElements(); i < NumToExtract; ++i) {
+        Mask.push_back(ExternalUse.Lane * NumToExtract + i);
+      }
+      Value *Ex = Builder.CreateShuffleVector(wideVec, UndefValue::get(wideVecTy), Mask);
+
+      CSEBlocks.insert(cast<Instruction>(narrowVec)->getParent());
+      auto &Locs = ExternallyUsedValues[narrowVec];
       ExternallyUsedValues.insert({Ex, Locs});
-      ExternallyUsedValues.erase(Scalar);
+      ExternallyUsedValues.erase(narrowVec);
       continue;
     }
 
     // Generate extracts for out-of-tree users.
-    // Find the insertion point for the extractelement lane.
-    if (auto *VecI = dyn_cast<Instruction>(Vec)) {
+    // Find the insertion point for the shufflevector.
+    if (auto *wideVecI = dyn_cast<Instruction>(wideVec)) {
       if (PHINode *PH = dyn_cast<PHINode>(User)) {
         for (int i = 0, e = PH->getNumIncomingValues(); i != e; ++i) {
-          if (PH->getIncomingValue(i) == Scalar) {
+          if (PH->getIncomingValue(i) == narrowVec) {
             TerminatorInst *IncomingTerminator =
                 PH->getIncomingBlock(i)->getTerminator();
             if (isa<CatchSwitchInst>(IncomingTerminator)) {
-              Builder.SetInsertPoint(VecI->getParent(),
-                                     std::next(VecI->getIterator()));
+              Builder.SetInsertPoint(wideVecI->getParent(),
+                                     std::next(wideVecI->getIterator()));
             } else {
+              // FIXME: Can't this just be `Builder.SetInsertPoint(IncomingTerminator)`?
               Builder.SetInsertPoint(PH->getIncomingBlock(i)->getTerminator());
             }
-            Value *Ex = Builder.CreateExtractElement(Vec, Lane);
+
+            // Extract narrow vector with shuffle
+            SmallVector<uint32_t, 16> Mask;
+            for (unsigned i = 0, NumToExtract = narrowVecTy->getNumElements(); i < NumToExtract; ++i)
+              Mask.push_back(ExternalUse.Lane * NumToExtract + i);
+            Value *Ex = Builder.CreateShuffleVector(wideVec, UndefValue::get(wideVecTy), Mask);
+
             CSEBlocks.insert(PH->getIncomingBlock(i));
             PH->setOperand(i, Ex);
           }
         }
       } else {
         Builder.SetInsertPoint(cast<Instruction>(User));
-        assert(Scalar->getType()->isVectorTy() && "Attempt to extract scalar for an external user!");
 
-        // Build a mask Lane*NumToExtract, ..., (Lane+1)*NumToExtract - 1
-        unsigned NumToExtract = Scalar->getType()->getVectorNumElements();
-        // TODO: Will we want to extract more than 32 values?
-        SmallVector<Constant *, 32> Mask(
-            NumToExtract, UndefValue::get(Builder.getInt32Ty()));
-        for (unsigned i = 0; i < NumToExtract; ++i)
-          Mask[i] = Builder.getInt32(ExternalUse.Lane * NumToExtract + i);
-        Value *ShuffleMask = ConstantVector::get(Mask);
+        // Extract narrow vector with shuffle
+        SmallVector<uint32_t, 16> Mask;
+        for (unsigned i = 0, NumToExtract = narrowVecTy->getNumElements(); i < NumToExtract; ++i)
+          Mask.push_back(ExternalUse.Lane * NumToExtract + i);
+        Value *Ex = Builder.CreateShuffleVector(wideVec, UndefValue::get(wideVecTy), Mask);
 
-        Value *UndefVec = UndefValue::get(Vec->getType());
-        Value *Ex = Builder.CreateShuffleVector(Vec, UndefVec, ShuffleMask);
-
-        // Value *Ex = Builder.CreateExtractElement(Vec, Lane);
         CSEBlocks.insert(cast<Instruction>(User)->getParent());
-        User->replaceUsesOfWith(Scalar, Ex);
+        User->replaceUsesOfWith(narrowVec, Ex);
       }
     } else {
       Builder.SetInsertPoint(&F->getEntryBlock().front());
-      Value *Ex = Builder.CreateExtractElement(Vec, Lane);
+
+      // Extract narrow vector with shuffle
+      SmallVector<uint32_t, 16> Mask;
+      for (unsigned i = 0, NumToExtract = narrowVecTy->getNumElements(); i < NumToExtract; ++i)
+        Mask.push_back(ExternalUse.Lane * NumToExtract + i);
+      Value *Ex = Builder.CreateShuffleVector(wideVec, UndefValue::get(wideVecTy), Mask);
+
       CSEBlocks.insert(&F->getEntryBlock());
-      User->replaceUsesOfWith(Scalar, Ex);
+      User->replaceUsesOfWith(narrowVec, Ex);
     }
 
     DEBUG(dbgs() << "Revec: Replaced:" << *User << ".\n");
@@ -3716,12 +3747,12 @@ BoUpSLP::vectorizeTree(ExtraValueToDebugLocsMap &ExternallyUsedValues) {
 
     // For each lane:
     for (int Lane = 0, LE = Entry->Scalars.size(); Lane != LE; ++Lane) {
-      Value *Scalar = Entry->Scalars[Lane];
+      Value *narrowVec = Entry->Scalars[Lane];
 
-      Type *Ty = Scalar->getType();
-      if (!Ty->isVoidTy()) {
+      Type *narrowVecTy = narrowVec->getType();
+      if (!narrowVecTy->isVoidTy()) {
 #ifndef NDEBUG
-        for (User *U : Scalar->users()) {
+        for (User *U : narrowVec->users()) {
           DEBUG(dbgs() << "Revec: \tvalidating user:" << *U << ".\n");
 
           // It is legal to replace users in the ignorelist by undef.
@@ -3729,11 +3760,11 @@ BoUpSLP::vectorizeTree(ExtraValueToDebugLocsMap &ExternallyUsedValues) {
                  "Replacing out-of-tree value with undef");
         }
 #endif
-        Value *Undef = UndefValue::get(Ty);
-        Scalar->replaceAllUsesWith(Undef);
+        Value *Undef = UndefValue::get(narrowVecTy);
+        narrowVec->replaceAllUsesWith(Undef);
       }
-      DEBUG(dbgs() << "Revec: \tErasing scalar:" << *Scalar << ".\n");
-      eraseInstruction(cast<Instruction>(Scalar));
+      DEBUG(dbgs() << "Revec: \tErasing narrow vector:" << *narrowVec << ".\n");
+      eraseInstruction(cast<Instruction>(narrowVec));
     }
   }
 
