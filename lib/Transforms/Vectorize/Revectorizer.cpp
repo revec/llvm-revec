@@ -104,7 +104,6 @@ using namespace revectorizer;
 
 #define SV_NAME "revectorizer"
 #define DEBUG_TYPE "REVEC"
-#define REVEC_TWO_GATHER
 
 STATISTIC(NumVectorInstructions, "Number of vector instructions generated");
 
@@ -731,11 +730,9 @@ private:
   /// \returns a concatenated vector from a collection of vectors in \p VL.
   Value *Gather(ArrayRef<Value *> VL, VectorType *Ty);
 
-#ifndef REVEC_TWO_GATHER
   /// \returns a concatenated vector from a collection of vectors in \p VL, ranging
   /// from VL[start] to VL[end - 1].
   Value *Gather_rec(ArrayRef<Value *> VL, VectorType *Ty, int start, int end);
-#endif
 
   Value *Gather_two(Value *L, Value *R);
 
@@ -1464,15 +1461,21 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
 
   // Ensure that all values are narorw vectors
   for (Value *val : VL) {
+    // TODO: What is the return of gep instructions?
+    if (dyn_cast<StoreInst>(val) || dyn_cast<GetElementPtrInst>(val)) {
+      // StoreInst returns void, but forms a valid bundle. Skip type checks.
+      continue;
+    }
+
     Type *Ty = val->getType();
     if (!isValidElementType(Ty)) {
-      DEBUG(dbgs() << "Revec: This bundle has invalid element type: " << *Ty << "\n");
+      DEBUG(dbgs() << "Revec: This bundle has invalid element type: " << *Ty << " for value: " << *val << "\n");
       newTreeEntry(VL, false, UserTreeIdx);
       return;
     }
 
     if (!isNarrowVectorType(Ty)) {
-      DEBUG(dbgs() << "Revec: This bundle has non-narrow element type: " << *Ty << "\n");
+      DEBUG(dbgs() << "Revec: This bundle has invalid element type: " << *Ty << " for value: " << *val << "\n");
       newTreeEntry(VL, false, UserTreeIdx);
       return;
     }
@@ -2627,17 +2630,27 @@ int BoUpSLP::getGatherCost(ArrayRef<Value *> VL) {
   unsigned size = VL.size();
   assert((isPowerOf2_32(size) && size > 1) && "Cannot estimate gather cost of VL not of size 2^i, i >= 1");
 
-  unsigned CurrentVF = 1;
   int Cost = 0;
+#if 1
+  Type *narrowVecTy = VL[0]->getType();
+  unsigned narrowNumElements = narrowVecTy->getVectorNumElements();
+  VectorType *wideVecTy = getVectorType(narrowVecTy, size);
+  for (unsigned i = 0; i < size; ++i) {
+    assert((VL[i]->getType() == narrowVecTy) && "Mismatched bundle types to be gathered!");
+    unsigned Idx = i * narrowNumElements;
+    Cost += TTI->getShuffleCost(TargetTransformInfo::SK_InsertSubvector,
+      wideVecTy, Idx, narrowVecTy);
+  }
+#else
+  unsigned CurrentVF = 1;
   Type *Ty = VL[0]->getType();
   while (CurrentVF < VL.size()) {
     Ty = getVectorType(Ty, 2);
     CurrentVF *= 2;
-
-    // TODO: Should this be GSC(SK_InsertSubvector, wideVecTy, idx0, narrowVecTy) + GSC(SK_InsertSubvector, wideVecTy, idx1, narrowVecTy)?
     Cost += (size / CurrentVF) *
       TTI->getShuffleCost(TargetTransformInfo::SK_PermuteTwoSrc, Ty);
   }
+#endif
 
   return Cost;
 }
@@ -2961,7 +2974,7 @@ Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
   assert((size == 2u) && "Gathering value list that is not of length two");
   Value *gathered = Gather_two(VL[0], VL[1]);
 #else
-  assert(((size & (size - 1)) == 0) && "Gathering value list that is not of a power of two length");
+  assert(isPowerOf2_32(size) && size > 1 && "Gathering value list that is not of a power of two length greater than 1");
   Value *gathered = Gather_rec(VL, Ty, 0, size);
 #endif
 
@@ -2991,38 +3004,19 @@ Value *BoUpSLP::Gather_two(Value *L, Value *R) {
   return Builder.CreateShuffleVector(L, R, mask);
 }
 
-#ifndef REVEC_TWO_GATHER
 Value *BoUpSLP::Gather_rec(ArrayRef<Value *> VL, VectorType *Ty, int start, int end) {
   assert((end >= start) && "Bad bounds passed to Gather_rec");
   int size = end - start;
-  assert((((unsigned) size & ((unsigned) size - 1)) == 0) && size != 1 && "Recursively gathering value list that is not of a power of two length, or is length 1");
+  assert(isPowerOf2_32(static_cast<uint32_t>(size)) && size > 1 && "Recursively gathering value list that is not of a power of two length, or is length 1");
 
-  if (size == 2) {
-    Value *Vec = Gather_two(VL[start], VL[start+1]);
-
-    // Record external use of VL[start] and VL[start+1]
-    if (Instruction *Insrt = dyn_cast<Instruction>(Vec)) {
-      // Record this gather/insert for later optimization
-      GatherSeq.insert(Insrt);
-      CSEBlocks.insert(Insrt->getParent());
-
-      RecordExternalUse(VL[start], Insrt);
-      RecordExternalUse(VL[start+1], Insrt);
-    }
-
-    return Vec;
-  }
+  if (size == 2)
+    return Gather_two(VL[start], VL[start+1]);
 
   int sizeLeft = size / 2;
   Value *L = Gather_rec(VL, Ty, start, start + sizeLeft);
   Value *R = Gather_rec(VL, Ty, start + sizeLeft, end);
-
-  if (L && R)
-    return Gather_two(L, R);
-
-  return L ? L : R;
+  return Gather_two(L, R);
 }
-#endif
 
 Value *BoUpSLP::vectorizeTree(ArrayRef<Value *> VL) {
   InstructionsState S = getSameOpcode(VL);
