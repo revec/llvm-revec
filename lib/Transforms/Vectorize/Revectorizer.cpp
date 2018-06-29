@@ -104,6 +104,7 @@ using namespace revectorizer;
 
 #define SV_NAME "revectorizer"
 #define DEBUG_TYPE "REVEC"
+#define REVEC_TWO_GATHER
 
 STATISTIC(NumVectorInstructions, "Number of vector instructions generated");
 
@@ -718,10 +719,6 @@ private:
   /// Vectorize a single entry in the tree, starting in \p VL.
   Value *vectorizeTree(ArrayRef<Value *> VL);
 
-  /// \returns the scalarization cost for this type. Scalarization in this
-  /// context means the creation of vectors from a group of scalars.
-  int getGatherCost(Type *Ty, const DenseSet<unsigned> &ShuffledIndices);
-
   /// \returns the scalarization cost for this list of values. Assuming that
   /// this subtree gets vectorized, we may need to extract the values from the
   /// roots. This method calculates the cost of extracting the values.
@@ -734,9 +731,11 @@ private:
   /// \returns a concatenated vector from a collection of vectors in \p VL.
   Value *Gather(ArrayRef<Value *> VL, VectorType *Ty);
 
+#ifndef REVEC_TWO_GATHER
   /// \returns a concatenated vector from a collection of vectors in \p VL, ranging
   /// from VL[start] to VL[end - 1].
   Value *Gather_rec(ArrayRef<Value *> VL, VectorType *Ty, int start, int end);
+#endif
 
   Value *Gather_two(Value *L, Value *R);
 
@@ -2624,37 +2623,23 @@ int BoUpSLP::getTreeCost() {
   return Cost;
 }
 
-int BoUpSLP::getGatherCost(Type *Ty,
-                           const DenseSet<unsigned> &ShuffledIndices) {
-  // TODO: This needs to be updated for tree gathers
-  int Cost = 0;
-  for (unsigned i = 0, e = Ty->getVectorNumElements(); i < e; ++i)
-    if (!ShuffledIndices.count(i))
-      Cost += TTI->getVectorInstrCost(Instruction::InsertElement, Ty, i);
-  if (!ShuffledIndices.empty())
-      Cost += TTI->getShuffleCost(TargetTransformInfo::SK_PermuteSingleSrc, Ty);
-  return Cost;
-}
-
 int BoUpSLP::getGatherCost(ArrayRef<Value *> VL) {
-  // Find the type of the operands in VL.
-  Type *narrowVecTy = VL[0]->getType();
-  if (StoreInst *SI = dyn_cast<StoreInst>(VL[0]))
-    narrowVecTy = SI->getValueOperand()->getType();
-  VectorType *VecTy = getVectorType(narrowVecTy, VL.size());
+  unsigned size = VL.size();
+  assert((isPowerOf2_32(size) && size > 1) && "Cannot estimate gather cost of VL not of size 2^i, i >= 1");
 
-  // Find the cost of inserting/extracting values from the vector.
-  // Check if the same elements are inserted several times and count them as
-  // shuffle candidates.
-  DenseSet<unsigned> ShuffledElements;
-  DenseSet<Value *> UniqueElements;
-  // Iterate in reverse order to consider insert elements with the high cost.
-  for (unsigned I = VL.size(); I > 0; --I) {
-    unsigned Idx = I - 1;
-    if (!UniqueElements.insert(VL[Idx]).second)
-      ShuffledElements.insert(Idx);
+  unsigned CurrentVF = 1;
+  int Cost = 0;
+  Type *Ty = VL[0]->getType();
+  while (CurrentVF < VL.size()) {
+    Ty = getVectorType(Ty, 2);
+    CurrentVF *= 2;
+
+    // TODO: Should this be GSC(SK_InsertSubvector, wideVecTy, idx0, narrowVecTy) + GSC(SK_InsertSubvector, wideVecTy, idx1, narrowVecTy)?
+    Cost += (size / CurrentVF) *
+      TTI->getShuffleCost(TargetTransformInfo::SK_PermuteTwoSrc, Ty);
   }
-  return getGatherCost(VecTy, ShuffledElements);
+
+  return Cost;
 }
 
 // Reorder commutative operations in alternate shuffle if the resulting vectors
@@ -2965,34 +2950,29 @@ void BoUpSLP::RecordExternalUse(Value *ElementVector, llvm::User *User) {
 
 Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
   unsigned size = VL.size();
-  // TODO: Support values lists of length longer than 2
-#if 1
+
+#ifndef NDEBUG
+  DEBUG(dbgs() << "Revec: Gathering value list of size " << size << ":\n");
+  for (Value *val : VL)
+    DEBUG(dbgs() << "Revec:    " << *val << "\n");
+#endif
+
+#ifdef REVEC_TWO_GATHER
   assert((size == 2u) && "Gathering value list that is not of length two");
-
-  DEBUG(dbgs() << "Revec: Gathering a value list of length 2:\n");
-  DEBUG(dbgs() << "Revec:    " << *VL[0] << "\n");
-  DEBUG(dbgs() << "Revec:    " << *VL[1] << "\n");
-
   Value *gathered = Gather_two(VL[0], VL[1]);
-
-  DEBUG(dbgs() << "Revec: Gathered:\n");
-  DEBUG(dbgs() << "Revec:    " << *gathered << "\n");
-
-  assert(gathered->getType()->getTypeID() == Ty->getTypeID() && "Gather generated a value of the incorrect type");
-  assert(gathered->getType()->getVectorNumElements() == Ty->getVectorNumElements() && "Gather generated a value with the incorrect number of elements");
-
-  return gathered;
 #else
   assert(((size & (size - 1)) == 0) && "Gathering value list that is not of a power of two length");
-
   Value *gathered = Gather_rec(VL, Ty, 0, size);
+#endif
 
   // TODO: Pad vector with undefs if the type does not match?
   assert(gathered->getType()->getTypeID() == Ty->getTypeID() && "Gather generated a value of the incorrect type");
   assert(gathered->getType()->getVectorNumElements() == Ty->getVectorNumElements() && "Gather generated a value with the incorrect number of elements");
 
+  DEBUG(dbgs() << "Revec: Gathered:\n");
+  DEBUG(dbgs() << "Revec:    " << *gathered << "\n");
+
   return gathered;
-#endif
 }
 
 Value *BoUpSLP::Gather_two(Value *L, Value *R) {
@@ -3005,14 +2985,13 @@ Value *BoUpSLP::Gather_two(Value *L, Value *R) {
 
   assert((leftElems > 0 && leftElems == rightElems) && "Bad sizes for gathered operands");
 
-  for (unsigned i = 0; i < leftElems + rightElems; ++i) {
+  for (unsigned i = 0; i < leftElems + rightElems; ++i)
     mask.emplace_back(static_cast<uint32_t>(i));
-  }
 
   return Builder.CreateShuffleVector(L, R, mask);
 }
 
-#if 0
+#ifndef REVEC_TWO_GATHER
 Value *BoUpSLP::Gather_rec(ArrayRef<Value *> VL, VectorType *Ty, int start, int end) {
   assert((end >= start) && "Bad bounds passed to Gather_rec");
   int size = end - start;
