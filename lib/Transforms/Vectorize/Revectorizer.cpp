@@ -153,6 +153,10 @@ static cl::opt<bool>
     ForceRevec("revec-force", cl::Hidden,
             cl::desc("Vectorize the revec tree regardless of the computed cost"));
 
+static cl::opt<bool>
+    ExtractInsertGather("revec-ext-ins-gather", cl::Hidden,
+            cl::desc("Gather narrow vector values by extracting and inserting each scalar"));
+
 // Limit the number of alias checks. The limit is chosen so that
 // it has no negative effect on the llvm benchmarks.
 static const unsigned AliasedCheckLimit = 10;
@@ -730,13 +734,18 @@ private:
   /// \returns a concatenated vector from a collection of vectors in \p VL.
   Value *Gather(ArrayRef<Value *> VL, VectorType *Ty);
 
+  /// \returns a concatenated vector from a collection of vectors in \p VL.
+  /// Emits an ExtractElement and InsertElement IR instruction for each scalar
+  /// in each value in VL. Enabled by -revec-extract-insert-gather LLVM flag.
+  Value *Gather_extract_insert(ArrayRef<Value *> VL, VectorType *Ty);
+
   /// \returns a concatenated vector from a collection of vectors in \p VL, ranging
   /// from VL[start] to VL[end - 1].
   Value *Gather_rec(ArrayRef<Value *> VL, VectorType *Ty, int start, int end);
 
   Value *Gather_two(Value *L, Value *R);
 
-  void RecordExternalUse(Value *ElementVector, llvm::User *User);
+  // void RecordExternalUse(Value *ElementVector, llvm::User *User);
 
   /// \returns whether the VectorizableTree is fully vectorizable and will
   /// be beneficial even the tree height is tiny.
@@ -2937,6 +2946,7 @@ void BoUpSLP::setInsertPointAfterBundle(ArrayRef<Value *> VL, Value *OpValue) {
   Builder.SetCurrentDebugLocation(Front->getDebugLoc());
 }
 
+#if 0
 void BoUpSLP::RecordExternalUse(Value *ElementVector, llvm::User *User) {
   TreeEntry *E = getTreeEntry(ElementVector);
 
@@ -2960,6 +2970,7 @@ void BoUpSLP::RecordExternalUse(Value *ElementVector, llvm::User *User) {
     ExternalUses.push_back(ExternalUser(ElementVector, User, FoundLane));
   }
 }
+#endif
 
 Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
   unsigned size = VL.size();
@@ -2970,22 +2981,64 @@ Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
     DEBUG(dbgs() << "Revec:    " << *val << "\n");
 #endif
 
-#ifdef REVEC_TWO_GATHER
-  assert((size == 2u) && "Gathering value list that is not of length two");
-  Value *gathered = Gather_two(VL[0], VL[1]);
-#else
-  assert(isPowerOf2_32(size) && size > 1 && "Gathering value list that is not of a power of two length greater than 1");
-  Value *gathered = Gather_rec(VL, Ty, 0, size);
-#endif
+  Value *gathered;
+
+  if (ExtractInsertGather) {
+    gathered = Gather_extract_insert(VL, Ty);
+  } else {
+    assert(isPowerOf2_32(size) && size > 1 && "Gathering value list that is not of a power of two length greater than 1");
+    gathered = Gather_rec(VL, Ty, 0, size);
+
+    // Debug implementation, limited to VL of size 2
+    // assert((size == 2u) && "Gathering value list that is not of length two");
+    // gathered = Gather_two(VL[0], VL[1]);
+  }
 
   // TODO: Pad vector with undefs if the type does not match?
-  assert(gathered->getType()->getTypeID() == Ty->getTypeID() && "Gather generated a value of the incorrect type");
-  assert(gathered->getType()->getVectorNumElements() == Ty->getVectorNumElements() && "Gather generated a value with the incorrect number of elements");
+  assert(gathered->getType()->getTypeID() == Ty->getTypeID() &&
+          "Gather generated a value of the incorrect type");
+  assert(gathered->getType()->getVectorNumElements() == Ty->getVectorNumElements() &&
+          "Gather generated a value with the incorrect number of elements");
 
   DEBUG(dbgs() << "Revec: Gathered:\n");
   DEBUG(dbgs() << "Revec:    " << *gathered << "\n");
 
   return gathered;
+}
+
+Value *BoUpSLP::Gather_extract_insert(ArrayRef<Value *> VL, VectorType *Ty) {
+  // Generate a pair of 'ExtractElement' and 'InsertElement' instructions for each scalar in each VL vector
+
+  // Create undefined vector to populate
+  Value *V = UndefValue::get(Ty);
+  unsigned numExtracted = 0;
+  for (Value *narrowVec : VL) {
+    // TODO: Could support inserting scalars as well
+    Type *narrowVecTy = narrowVec->getType();
+    assert(narrowVecTy->isVectorTy() && "attempted to extend a vector with a non-vector type");
+
+#ifndef NDEBUG
+    // FIXME: See Gather_two explaination
+    assert(!getTreeEntry(narrowVec) && "Gathered an already vectorized value!");
+#endif
+
+    for (unsigned j = 0, e = narrowVecTy->getVectorNumElements(); j < e; ++j) {
+      Value *scalar = Builder.CreateExtractElement(narrowVec, Builder.getInt32(j));
+      V = Builder.CreateInsertElement(V, scalar, Builder.getInt32(numExtracted));
+      ++numExtracted;
+
+      if (Instruction *I = dyn_cast<Instruction>(V)) {
+        // Record this insert for later optimization
+        GatherSeq.insert(I);
+        CSEBlocks.insert(I->getParent());
+      }
+    }
+  }
+
+  DEBUG(dbgs() << "Revec: During gather, extracted and inserted" << numExtracted << " scalars to place in vector "
+               << *V << " (fits " << Ty->getNumElements() << " elements)\n");
+
+  return V;
 }
 
 Value *BoUpSLP::Gather_two(Value *L, Value *R) {
@@ -3003,6 +3056,7 @@ Value *BoUpSLP::Gather_two(Value *L, Value *R) {
   Value *V = Builder.CreateShuffleVector(L, R, mask);
 
   if (Instruction *I = dyn_cast<Instruction>(V)) {
+    // Record this shuffle for later optimization
     GatherSeq.insert(I);
     CSEBlocks.insert(I->getParent());
 
