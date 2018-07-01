@@ -631,7 +631,7 @@ public:
 
   /// Construct a vectorizable tree that starts at \p Roots, ignoring users for
   /// the purpose of scheduling and extraction in the \p UserIgnoreLst taking
-  /// into account (anf updating it, if required) list of externally used
+  /// into account (and updating it, if required) list of externally used
   /// values stored in \p ExternallyUsedValues.
   void buildTree(ArrayRef<Value *> Roots,
                  ExtraValueToDebugLocsMap &ExternallyUsedValues,
@@ -1416,8 +1416,8 @@ void BoUpSLP::buildTree(ArrayRef<Value *> Roots,
       // Check if the narrow vector is externally used as an extra arg.
       auto ExtI = ExternallyUsedValues.find(narrowVec);
       if (ExtI != ExternallyUsedValues.end()) {
-        DEBUG(dbgs() << "Revec: Need to extract: Extra arg from lane " <<
-        Lane << " from " << *narrowVec << ".\n");
+        DEBUG(dbgs() << "Revec: Need to extract: Extra arg " << *narrowVec << " from lane " <<
+        Lane << ".\n");
         ExternalUses.emplace_back(narrowVec, nullptr, FoundLane);
       }
       for (User *U : narrowVec->users()) {
@@ -2477,7 +2477,7 @@ bool BoUpSLP::isTreeTinyAndNotFullyVectorizable() {
 
   assert(VectorizableTree.empty()
              ? ExternalUses.empty()
-             : true && "We shouldn't have any external users");
+             : true && "We shouldn't have any external users for empty vectorizable tree");
 
   // Otherwise, we can't vectorize the tree. It is both tiny and not fully
   // vectorizable.
@@ -2989,8 +2989,6 @@ Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
 }
 
 Value *BoUpSLP::Gather_two(Value *L, Value *R) {
-  SmallVector<uint32_t, 32> mask;
-
   assert((L->getType() == R->getType()) && "Gathering values of different types");
 
   unsigned leftElems = L->getType()->getVectorNumElements();
@@ -2998,10 +2996,28 @@ Value *BoUpSLP::Gather_two(Value *L, Value *R) {
 
   assert((leftElems > 0 && leftElems == rightElems) && "Bad sizes for gathered operands");
 
+  SmallVector<uint32_t, 32> mask;
   for (unsigned i = 0; i < leftElems + rightElems; ++i)
     mask.emplace_back(static_cast<uint32_t>(i));
 
-  return Builder.CreateShuffleVector(L, R, mask);
+  Value *V = Builder.CreateShuffleVector(L, R, mask);
+
+  if (Instruction *I = dyn_cast<Instruction>(V)) {
+    GatherSeq.insert(I);
+    CSEBlocks.insert(I->getParent());
+
+#ifndef NDEBUG
+    // FIXME: It may in fact be possible for a value to be vectorized
+    // (i.e. in a tree entry - non-vectorized values are not in the ScalartoTreeEntry map),
+    // but gathered with some other values. This would require an extract, which is currently not
+    // implemented. If these assertions fail on some benchmark, then L and R should be added
+    // to ExternalUses, where the use is V, if a tree entry exists.
+    assert(!getTreeEntry(L) && "Gathered an already vectorized value!");
+    assert(!getTreeEntry(R) && "Gathered an already vectorized value!");
+#endif
+  }
+
+  return V;
 }
 
 Value *BoUpSLP::Gather_rec(ArrayRef<Value *> VL, VectorType *Ty, int start, int end) {
@@ -3749,7 +3765,7 @@ BoUpSLP::vectorizeTree(ExtraValueToDebugLocsMap &ExternallyUsedValues) {
 void BoUpSLP::optimizeGatherSequence() {
   DEBUG(dbgs() << "Revec: Optimizing " << GatherSeq.size()
         << " gather sequences instructions.\n");
-  // LICM InsertElementInst sequences.
+  // LICM InsertElementInst or ShuffleVectorInst sequences.
   for (Instruction *I : GatherSeq) {
     if (!isa<InsertElementInst>(I) && !isa<ShuffleVectorInst>(I))
       continue;
@@ -3805,7 +3821,8 @@ void BoUpSLP::optimizeGatherSequence() {
     // For all instructions in blocks containing gather sequences:
     for (BasicBlock::iterator it = BB->begin(), e = BB->end(); it != e;) {
       Instruction *In = &*it++;
-      if (!isa<InsertElementInst>(In) && !isa<ExtractElementInst>(In))
+      // TODO: Can InsertElementInst or ExtractElementInst appear?
+      if (!isa<InsertElementInst>(In) && !isa<ExtractElementInst>(In) &&!isa<ShuffleVectorInst>(In))
         continue;
 
       // Check if we can replace this instruction with any of the
