@@ -92,6 +92,7 @@ private:
   ///       every time we run into a memory barrier.
   void collectSeedInstructions(BasicBlock *BB, revectorizer::BoUpSLP &R);
 
+#if 0
   /// \brief Try to vectorize a chain that starts at two arithmetic instrs.
   bool tryToVectorizePair(Value *A, Value *B, revectorizer::BoUpSLP &R);
 
@@ -104,10 +105,12 @@ private:
 
   /// \brief Try to vectorize a chain that may start at the operands of \p I.
   bool tryToVectorize(Instruction *I, revectorizer::BoUpSLP &R);
+#endif
 
   /// \brief Vectorize the store instructions collected in Stores.
   bool vectorizeStoreChains(revectorizer::BoUpSLP &R);
 
+#if 0
   /// \brief Vectorize the index computations of the getelementptr instructions
   /// collected in GEPs.
   bool vectorizeGEPIndices(BasicBlock *BB, revectorizer::BoUpSLP &R);
@@ -137,6 +140,7 @@ private:
   /// \brief Scan the basic block and look for patterns that are likely to start
   /// a vectorization chain.
   bool vectorizeChainsInBlock(BasicBlock *BB, revectorizer::BoUpSLP &R);
+#endif
 
   bool vectorizeStoreChain(ArrayRef<Value *> Chain, revectorizer::BoUpSLP &R,
                            unsigned VecRegSize);
@@ -146,8 +150,10 @@ private:
   /// The store instructions in a basic block organized by base pointer.
   StoreListMap Stores;
 
+#if 0
   /// The getelementptr instructions in a basic block organized by base pointer.
   WeakTrackingVHListMap GEPs;
+#endif
 };
 
 } // end namespace llvm

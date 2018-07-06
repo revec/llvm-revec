@@ -265,6 +265,7 @@ static bool isSplat(ArrayRef<Value *> VL) {
   return true;
 }
 
+#if 0
 /// Checks if the vector of instructions can be represented as a shuffle, like:
 /// %x0 = extractelement <4 x i8> %x, i32 0
 /// %x3 = extractelement <4 x i8> %x, i32 3
@@ -377,6 +378,7 @@ isShuffle(ArrayRef<Value *> VL) {
   return Vec2 ? TargetTransformInfo::SK_PermuteTwoSrc
               : TargetTransformInfo::SK_PermuteSingleSrc;
 }
+#endif
 
 ///\returns Opcode that can be clubbed with \p Op to create an alternate
 /// sequence which can later be merged as a ShuffleVector instruction.
@@ -4514,7 +4516,9 @@ bool RevectorizerPass::runImpl(Function &F, ScalarEvolution *SE_,
   DL = &F.getParent()->getDataLayout();
 
   Stores.clear();
+#if 0
   GEPs.clear();
+#endif
   bool Changed = false;
 
   // If the target claims to have no vector registers don't attempt
@@ -4546,9 +4550,10 @@ bool RevectorizerPass::runImpl(Function &F, ScalarEvolution *SE_,
       Changed |= vectorizeStoreChains(R);
     }
 
+#if 0
     // Vectorize trees that end at reductions.
     bool VectorizedChains = vectorizeChainsInBlock(BB, R);
-    assert(!VectorizedChains && "Not expecting to successfully vectorize chains in block");
+    // assert(!VectorizedChains && "Not expecting to successfully vectorize chains in block");
 
     // Vectorize the index computations of getelementptr instructions. This
     // is primarily intended to catch gather-like idioms ending at
@@ -4557,8 +4562,9 @@ bool RevectorizerPass::runImpl(Function &F, ScalarEvolution *SE_,
       DEBUG(dbgs() << "Revec: Found GEPs for " << GEPs.size()
                    << " underlying objects.\n");
       bool VectorizedGEP = vectorizeGEPIndices(BB, R);
-      assert(!VectorizedGEP && "Not expecting to successfully vectorize GEP indices");
+      // assert(!VectorizedGEP && "Not expecting to successfully vectorize GEP indices");
     }
+#endif
   }
 
   if (Changed) {
@@ -4719,7 +4725,9 @@ bool RevectorizerPass::vectorizeStores(ArrayRef<StoreInst *> Stores,
 void RevectorizerPass::collectSeedInstructions(BasicBlock *BB, BoUpSLP &R) {
   // Initialize the collections. We will make a single pass over the block.
   Stores.clear();
+#if 0
   GEPs.clear();
+#endif
 
   // Visit the store and getelementptr instructions in BB and organize them in
   // Stores and GEPs according to the underlying objects of their pointer
@@ -4738,6 +4746,7 @@ void RevectorizerPass::collectSeedInstructions(BasicBlock *BB, BoUpSLP &R) {
       Stores[GetUnderlyingObject(SI->getPointerOperand(), *DL)].push_back(SI);
     }
 
+#if 0
     // Ignore getelementptr instructions that have more than one index, a
     // constant index, or a pointer operand that doesn't point to a scalar
     // type.
@@ -4752,9 +4761,11 @@ void RevectorizerPass::collectSeedInstructions(BasicBlock *BB, BoUpSLP &R) {
         continue;
       GEPs[GetUnderlyingObject(GEP->getPointerOperand(), *DL)].push_back(GEP);
     }
+#endif
   }
 }
 
+#if 0
 bool RevectorizerPass::tryToVectorizePair(Value *A, Value *B, BoUpSLP &R) {
   if (!A || !B)
     return false;
@@ -6201,7 +6212,9 @@ bool RevectorizerPass::vectorizeChainsInBlock(BasicBlock *BB, BoUpSLP &R) {
 
   return Changed;
 }
+#endif
 
+#if 0
 bool RevectorizerPass::vectorizeGEPIndices(BasicBlock *BB, BoUpSLP &R) {
   auto Changed = false;
   for (auto &Entry : GEPs) {
@@ -6284,6 +6297,7 @@ bool RevectorizerPass::vectorizeGEPIndices(BasicBlock *BB, BoUpSLP &R) {
   }
   return Changed;
 }
+#endif
 
 bool RevectorizerPass::vectorizeStoreChains(BoUpSLP &R) {
   bool Changed = false;
