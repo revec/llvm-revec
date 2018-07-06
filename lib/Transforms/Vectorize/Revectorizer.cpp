@@ -4547,7 +4547,8 @@ bool RevectorizerPass::runImpl(Function &F, ScalarEvolution *SE_,
     }
 
     // Vectorize trees that end at reductions.
-    Changed |= vectorizeChainsInBlock(BB, R);
+    bool VectorizedChains = vectorizeChainsInBlock(BB, R);
+    assert(!VectorizedChains && "Not expecting to successfully vectorize chains in block");
 
     // Vectorize the index computations of getelementptr instructions. This
     // is primarily intended to catch gather-like idioms ending at
@@ -4555,7 +4556,8 @@ bool RevectorizerPass::runImpl(Function &F, ScalarEvolution *SE_,
     if (!GEPs.empty()) {
       DEBUG(dbgs() << "Revec: Found GEPs for " << GEPs.size()
                    << " underlying objects.\n");
-      Changed |= vectorizeGEPIndices(BB, R);
+      bool VectorizedGEP = vectorizeGEPIndices(BB, R);
+      assert(!VectorizedGEP && "Not expecting to successfully vectorize GEP indices");
     }
   }
 
