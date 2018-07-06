@@ -2545,12 +2545,9 @@ int BoUpSLP::getSpillCost() {
         SmallVector<Type*, 4> V;
         for (auto *II : LiveValues) {
           // Widen II's type by factor BundleWidth
-          auto *vectorElTy = II->getType();
-          auto *elTy = vectorElTy->getVectorElementType();
-          unsigned TotalBundleWidth = vectorElTy->getVectorNumElements() * BundleWidth;
-
-          assert(elTy && "Trying to fuse scalars");
-          V.push_back(getVectorType(elTy, TotalBundleWidth));
+          auto *narrowVectorTy = II->getType();
+          assert(narrowVectorTy->isVectorTy() && "Trying to fuse scalars");
+          V.push_back(getVectorType(narrowVectorTy, BundleWidth));
         }
         Cost += TTI->getCostOfKeepingLiveOverCall(V);
       }
@@ -2565,12 +2562,12 @@ int BoUpSLP::getSpillCost() {
 }
 
 int BoUpSLP::getTreeCost() {
-  int Cost = 0;
   DEBUG(dbgs() << "Revec: Calculating cost for tree of size " <<
         VectorizableTree.size() << ".\n");
 
   unsigned BundleWidth = VectorizableTree[0].Scalars.size();
 
+  int EntryCosts = 0;
   for (unsigned I = 0, E = VectorizableTree.size(); I < E; ++I) {
     TreeEntry &TE = VectorizableTree[I];
 
@@ -2596,7 +2593,7 @@ int BoUpSLP::getTreeCost() {
     int C = getEntryCost(&TE);
     DEBUG(dbgs() << "Revec: Adding cost " << C << " for bundle that starts with "
                  << *TE.Scalars[0] << ".\n");
-    Cost += C;
+    EntryCosts += C;
   }
 
   SmallSet<Value *, 16> ExtractCostCalculated;
@@ -2620,16 +2617,22 @@ int BoUpSLP::getTreeCost() {
   }
 
   int SpillCost = getSpillCost();
-  Cost += SpillCost + ExtractCost;
+
+  int Cost = EntryCosts + SpillCost + ExtractCost;
 
   std::string Str;
   {
     raw_string_ostream OS(Str);
-    OS << "Revec: Spill Cost = " << SpillCost << ".\n"
-       << "Revec: Extract Cost = " << ExtractCost << ".\n"
-       << "Revec: Total Cost = " << Cost << ".\n";
+    OS << "Revec costs for " << F->getName()
+       << ": Entries = " << EntryCosts << ", "
+       << "Spill = " << SpillCost << ", "
+       << "Extract = " << ExtractCost << ", "
+       << "Total = " << Cost << ".\n";
   }
   DEBUG(dbgs() << Str);
+#ifndef NDEBUG
+  printf("%s", Str.c_str());
+#endif
 
   if (WriteRevecTree)
     WriteGraph(this, "Revec" + F->getName(), false, Str);
@@ -6212,9 +6215,7 @@ bool RevectorizerPass::vectorizeChainsInBlock(BasicBlock *BB, BoUpSLP &R) {
 
   return Changed;
 }
-#endif
 
-#if 0
 bool RevectorizerPass::vectorizeGEPIndices(BasicBlock *BB, BoUpSLP &R) {
   auto Changed = false;
   for (auto &Entry : GEPs) {
