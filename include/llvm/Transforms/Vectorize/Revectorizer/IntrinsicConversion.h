@@ -36,13 +36,6 @@ static void initializeIntrinsicWideningMap() {
         { 2, Intrinsic::x86_avx512_packusdw_512}}));
     intrinsicWideningMap.try_emplace(Intrinsic::x86_avx2_packuswb, std::vector<WideningTarget>({
         { 2, Intrinsic::x86_avx512_packuswb_512}}));
-    intrinsicWideningMap.try_emplace(Intrinsic::x86_avx2_pmovmskb, std::vector<WideningTarget>({
-        { 1, Intrinsic::x86_avx512_cvtb2mask_256}, 
-        { 2, Intrinsic::x86_avx512_cvtb2mask_512}}));
-    intrinsicWideningMap.try_emplace(Intrinsic::x86_avx2_pmul_dq, std::vector<WideningTarget>({
-        { 2, Intrinsic::x86_avx512_pmul_dq_512}}));
-    intrinsicWideningMap.try_emplace(Intrinsic::x86_avx2_pmulu_dq, std::vector<WideningTarget>({
-        { 2, Intrinsic::x86_avx512_pmulu_dq_512}}));
     intrinsicWideningMap.try_emplace(Intrinsic::x86_avx2_psad_bw, std::vector<WideningTarget>({
         { 2, Intrinsic::x86_avx512_psad_bw_512}}));
     intrinsicWideningMap.try_emplace(Intrinsic::x86_avx2_pshuf_b, std::vector<WideningTarget>({
@@ -93,19 +86,6 @@ static void initializeIntrinsicWideningMap() {
         { 4, Intrinsic::x86_avx512_psrlv_q_512}}));
     intrinsicWideningMap.try_emplace(Intrinsic::x86_avx2_psrlv_q_256, std::vector<WideningTarget>({
         { 2, Intrinsic::x86_avx512_psrlv_q_512}}));
-    intrinsicWideningMap.try_emplace(Intrinsic::x86_avx512_cvtb2mask_128, std::vector<WideningTarget>({
-        { 2, Intrinsic::x86_avx2_pmovmskb}, 
-        { 2, Intrinsic::x86_avx512_cvtb2mask_256}, 
-        { 4, Intrinsic::x86_avx512_cvtb2mask_512}}));
-    intrinsicWideningMap.try_emplace(Intrinsic::x86_avx512_cvtb2mask_256, std::vector<WideningTarget>({
-        { 2, Intrinsic::x86_avx512_cvtb2mask_512}}));
-    intrinsicWideningMap.try_emplace(Intrinsic::x86_avx512_cvtd2mask_256, std::vector<WideningTarget>({
-        { 2, Intrinsic::x86_avx512_cvtd2mask_512}}));
-    intrinsicWideningMap.try_emplace(Intrinsic::x86_avx512_cvtw2mask_128, std::vector<WideningTarget>({
-        { 2, Intrinsic::x86_avx512_cvtw2mask_256}, 
-        { 4, Intrinsic::x86_avx512_cvtw2mask_512}}));
-    intrinsicWideningMap.try_emplace(Intrinsic::x86_avx512_cvtw2mask_256, std::vector<WideningTarget>({
-        { 2, Intrinsic::x86_avx512_cvtw2mask_512}}));
     intrinsicWideningMap.try_emplace(Intrinsic::x86_avx512_psllv_w_128, std::vector<WideningTarget>({
         { 2, Intrinsic::x86_avx512_psllv_w_256}, 
         { 4, Intrinsic::x86_avx512_psllv_w_512}}));
@@ -198,9 +178,6 @@ static void initializeIntrinsicWideningMap() {
         { 2, Intrinsic::x86_avx2_pmulh_w}}));
     intrinsicWideningMap.try_emplace(Intrinsic::x86_sse2_pmulhu_w, std::vector<WideningTarget>({
         { 2, Intrinsic::x86_avx2_pmulhu_w}}));
-    intrinsicWideningMap.try_emplace(Intrinsic::x86_sse2_pmulu_dq, std::vector<WideningTarget>({
-        { 2, Intrinsic::x86_avx2_pmulu_dq}, 
-        { 4, Intrinsic::x86_avx512_pmulu_dq_512}}));
     intrinsicWideningMap.try_emplace(Intrinsic::x86_sse2_psad_bw, std::vector<WideningTarget>({
         { 2, Intrinsic::x86_avx2_psad_bw}, 
         { 4, Intrinsic::x86_avx512_psad_bw_512}}));
@@ -264,9 +241,6 @@ static void initializeIntrinsicWideningMap() {
         { 4, Intrinsic::x86_avx512_packusdw_512}}));
     intrinsicWideningMap.try_emplace(Intrinsic::x86_sse41_pblendvb, std::vector<WideningTarget>({
         { 2, Intrinsic::x86_avx2_pblendvb}}));
-    intrinsicWideningMap.try_emplace(Intrinsic::x86_sse41_pmuldq, std::vector<WideningTarget>({
-        { 2, Intrinsic::x86_avx2_pmul_dq}, 
-        { 4, Intrinsic::x86_avx512_pmul_dq_512}}));
     intrinsicWideningMap.try_emplace(Intrinsic::x86_sse_max_ps, std::vector<WideningTarget>({
         { 2, Intrinsic::x86_avx_max_ps_256}}));
     intrinsicWideningMap.try_emplace(Intrinsic::x86_sse_min_ps, std::vector<WideningTarget>({
