@@ -121,26 +121,6 @@ static void initializeIntrinsicWideningMap() {
         { 4, Intrinsic::x86_avx512_vpermilvar_ps_512}}));
     intrinsicWideningMap.try_emplace(Intrinsic::x86_avx_vpermilvar_ps_256, std::vector<WideningTarget>({
         { 2, Intrinsic::x86_avx512_vpermilvar_ps_512}}));
-    intrinsicWideningMap.try_emplace(Intrinsic::x86_fma_vfmadd_pd, std::vector<WideningTarget>({
-        { 2, Intrinsic::x86_fma_vfmadd_pd_256}}));
-    intrinsicWideningMap.try_emplace(Intrinsic::x86_fma_vfmadd_ps, std::vector<WideningTarget>({
-        { 2, Intrinsic::x86_fma_vfmadd_ps_256}}));
-    intrinsicWideningMap.try_emplace(Intrinsic::x86_fma_vfmaddsub_pd, std::vector<WideningTarget>({
-        { 2, Intrinsic::x86_fma_vfmaddsub_pd_256}}));
-    intrinsicWideningMap.try_emplace(Intrinsic::x86_fma_vfmaddsub_ps, std::vector<WideningTarget>({
-        { 2, Intrinsic::x86_fma_vfmaddsub_ps_256}}));
-    intrinsicWideningMap.try_emplace(Intrinsic::x86_fma_vfmsub_pd, std::vector<WideningTarget>({
-        { 2, Intrinsic::x86_fma_vfmsub_pd_256}}));
-    intrinsicWideningMap.try_emplace(Intrinsic::x86_fma_vfmsub_ps, std::vector<WideningTarget>({
-        { 2, Intrinsic::x86_fma_vfmsub_ps_256}}));
-    intrinsicWideningMap.try_emplace(Intrinsic::x86_fma_vfmsubadd_pd, std::vector<WideningTarget>({
-        { 2, Intrinsic::x86_fma_vfmsubadd_pd_256}}));
-    intrinsicWideningMap.try_emplace(Intrinsic::x86_fma_vfmsubadd_ps, std::vector<WideningTarget>({
-        { 2, Intrinsic::x86_fma_vfmsubadd_ps_256}}));
-    intrinsicWideningMap.try_emplace(Intrinsic::x86_fma_vfnmadd_pd, std::vector<WideningTarget>({
-        { 2, Intrinsic::x86_fma_vfnmadd_pd_256}}));
-    intrinsicWideningMap.try_emplace(Intrinsic::x86_fma_vfnmadd_ps, std::vector<WideningTarget>({
-        { 2, Intrinsic::x86_fma_vfnmadd_ps_256}}));
     intrinsicWideningMap.try_emplace(Intrinsic::x86_fma_vfnmsub_pd, std::vector<WideningTarget>({
         { 2, Intrinsic::x86_fma_vfnmsub_pd_256}}));
     intrinsicWideningMap.try_emplace(Intrinsic::x86_fma_vfnmsub_ps, std::vector<WideningTarget>({
