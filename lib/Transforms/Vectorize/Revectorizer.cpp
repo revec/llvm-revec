@@ -220,15 +220,16 @@ static Intrinsic::ID getIntrinsicByCall(CallInst *CI) {
 }
 
 /// \returns the ID of an intrinsic that is the widened equivalent of IID, and the widening factor.
-static std::pair<Intrinsic::ID, int> getWidenedIntrinsic(Intrinsic::ID IID) {
+static std::pair<int, Intrinsic::ID> getWidenedIntrinsic(Intrinsic::ID IID, int VF) {
   // TODO: Take into account the available intrinsics on this platform to only return
   //       usable intrinsics if multiple conversions are available.
-  if (intrinsicWideningMap.count(static_cast<unsigned>(IID))) {
-    const auto& altPair = intrinsicWideningMap[IID];
-    return std::pair<Intrinsic::ID, int>(static_cast<Intrinsic::ID>(altPair.first), altPair.second);
-  } else {
-    return std::make_pair(Intrinsic::not_intrinsic, -1);
-  }
+  unsigned base = static_cast<unsigned>(IID);
+  if (intrinsicWideningMap.count(base))
+    for (const auto& target : intrinsicWideningMap[base])
+      if (target.first == VF)
+        return target;
+
+  return std::make_pair(-1, Intrinsic::not_intrinsic);
 }
 
 /// \returns true if all of the instructions in \p VL are in the same block or
@@ -1929,9 +1930,9 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
         DEBUG(dbgs() << "Revec: Found intrinsic function " << llvm::Intrinsic::getName(IID) << "\n");
 
         // Find intrinsic conversion and merge factor
-        const auto& altPair = getWidenedIntrinsic(IID);
-        Intrinsic::ID alt = altPair.first;
-        int VF = altPair.second;
+        const auto& target = getWidenedIntrinsic(IID, VL.size());
+        int VF = target.first;
+        Intrinsic::ID alt = target.second;
 
         if (alt != Intrinsic::not_intrinsic && VF > 0) {
           if (VF == static_cast<long>(VL.size())) {
@@ -2363,9 +2364,9 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       }
 
       // Find widened intrinsic ID
-      const auto& altPair = getWidenedIntrinsic(IID);
-      Intrinsic::ID alt = altPair.first;
-      int VF = altPair.second;
+      const auto& target = getWidenedIntrinsic(IID, E->Scalars.size());
+      int VF = target.first;
+      Intrinsic::ID alt = target.second;
       assert(alt != Intrinsic::not_intrinsic && VF > 0 && "Attempting to compute cost of intrinsic call entry, but no wide equivalence found.");
       assert(VF == static_cast<long>(VL.size()) && "Cannot bundle intrinsic calls, where known widening factor does not match bundle size.");
 
@@ -3554,9 +3555,9 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       assert(IID != Intrinsic::not_intrinsic);
       DEBUG(dbgs() << "Revec: Vectorizing intrinsic function " << llvm::Intrinsic::getName(IID) << "\n");
 
-      const auto& altPair = getWidenedIntrinsic(IID);
-      Intrinsic::ID alt = altPair.first;
-      int VF = altPair.second;
+      const auto& target = getWidenedIntrinsic(IID, E->Scalars.size());
+      int VF = target.first;
+      Intrinsic::ID alt = target.second;
       assert(alt != Intrinsic::not_intrinsic && VF > 0 && "Attempting to vectorize intrinsic call, but no equivalence found.");
 
       // TODO: Support splitting larger bundles followed by a gather if an intrinsic
