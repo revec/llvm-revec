@@ -1914,6 +1914,10 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
         return;
       }
 
+#ifndef NDEBUG
+      printf("Revec: unable to vertically bundle shufflevector operands (left or right not allConstant).");
+#endif
+
       // TODO: Search recursively for optimal bundles, with backtracking
 
       BS.cancelScheduling(VL, VL0);
