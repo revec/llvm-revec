@@ -170,6 +170,8 @@ static const unsigned MaxMemDepDistance = 160;
 /// regions to be handled.
 static const int MinScheduleRegionSize = 16;
 
+static const unsigned MaxBundleSize = 32u;
+
 /// \brief Predicate for the element types that the SLP revectorizer supports.
 static bool isValidElementType(Type *Ty) {
   // TODO: Should this check that Ty is not a vector of pointers?
@@ -281,6 +283,19 @@ static bool isOdd(unsigned Value) {
 static bool sameOpcodeOrAlt(unsigned Opcode, unsigned AltOpcode,
                             unsigned CheckedOpcode) {
   return Opcode == CheckedOpcode || AltOpcode == CheckedOpcode;
+}
+
+static bool sameBundle(ArrayRef<Value *> VL, ArrayRef<Value *> AltVL) {
+  unsigned BundleSize = VL.size();
+
+  if (BundleSize != AltVL.size())
+    return false;
+
+  for (unsigned i = 0; i < BundleSize; ++i)
+    if (VL[i] != AltVL[i])
+      return false;
+
+  return true;
 }
 
 /// Chooses the correct key for scheduling data. If \p Op has the same (or
@@ -448,6 +463,7 @@ static bool isSimple(Instruction *I) {
   return true;
 }
 
+
 namespace llvm {
 
 namespace revectorizer {
@@ -585,6 +601,9 @@ private:
   /// Checks if all users of \p I are the part of the vectorization tree.
   bool areAllUsersVectorized(Instruction *I) const;
 
+  /// \returns the cost of a particular shufflevector instruction based on special cases.
+  int getShuffleCost(VectorType *Op0, VectorType *Op1, VectorType *Mask);
+
   /// \returns the cost of the vectorizable entry.
   int getEntryCost(TreeEntry *E);
 
@@ -678,6 +697,27 @@ private:
     /// have multiple users so the data structure is not truly a tree.
     SmallVector<int, 1> UserTreeIndices;
   };
+
+  using BundleDecision = std::bitset<MaxBundleSize>;
+  SmallVector<std::pair<ArrayRef<Value *>, BundleDecision>, 32> BundleDecisionCache;
+
+  Optional<BundleDecision> getBundleDecision(ArrayRef<Value *> VL) {
+    for (const auto& BundleAndDecision : BundleDecisionCache)
+      if (sameBundle(VL, BundleAndDecision.first))
+        return Optional<BundleDecision>(BundleAndDecision.second);
+
+    // VL was not found in the decision cache
+    return Optional<BundleDecision>();
+  }
+
+  inline void newBundleDecision(ArrayRef<Value *> VL, BundleDecision operandIndices) {
+    BundleDecisionCache.emplace_back(VL, operandIndices);
+  }
+
+  inline void newBundleDecision(ArrayRef<Value *> VL) {
+    BundleDecision laneWideningDecision;
+    newBundleDecision(VL, laneWideningDecision);
+  }
 
   /// Create a new VectorizableTree entry.
   void newTreeEntry(ArrayRef<Value *> VL, bool Vectorized, int &UserTreeIdx,
@@ -924,6 +964,8 @@ private:
 
     /// Opcode of the current instruction in the schedule data.
     Value *OpValue = nullptr;
+
+
   };
 
 #ifndef NDEBUG
@@ -1829,37 +1871,56 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
       newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
       return;
     }
-    case Instruction::ShuffleVector:
-      // If this is not an alternate sequence of opcode like add-sub
-      // then do not vectorize this instruction.
-      if (!S.IsAltShuffle) {
-        BS.cancelScheduling(VL, VL0);
-        newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
-        LLVM_DEBUG(dbgs() << "Revec: ShuffleVector are not vectorized.\n");
+    case Instruction::ShuffleVector: {
+      if (S.IsAltShuffle) {
+        newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
+        LLVM_DEBUG(dbgs() << "Revec: added a ShuffleVector op.\n");
+
+        // Reorder operands if reordering would enable vectorization.
+        if (isa<BinaryOperator>(VL0)) {
+          ValueList Left, Right;
+          reorderAltShuffleOperands(S.Opcode, VL, Left, Right);
+          buildTree_rec(Left, Depth + 1, UserTreeIdx);
+          buildTree_rec(Right, Depth + 1, UserTreeIdx);
+          return;
+        }
+
+        for (unsigned i = 0, e = VL0->getNumOperands(); i < e; ++i) {
+          ValueList Operands;
+          // Prepare the operand vector.
+          for (Value *j : VL)
+            Operands.push_back(cast<Instruction>(j)->getOperand(i));
+
+          buildTree_rec(Operands, Depth + 1, UserTreeIdx);
+        }
         return;
       }
-      newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
-      LLVM_DEBUG(dbgs() << "Revec: added a ShuffleVector op.\n");
 
-      // Reorder operands if reordering would enable vectorization.
-      if (isa<BinaryOperator>(VL0)) {
-        ValueList Left, Right;
-        reorderAltShuffleOperands(S.Opcode, VL, Left, Right);
+      // Check for special cases with an optimal vectorization decision
+      ValueList Left, Right;
+      for (Value *V : VL) {
+        Instruction *I = cast<Instruction>(V);
+        Left.push_back(I->getOperand(0));
+        Right.push_back(I->getOperand(1));
+      }
+
+      if (allConstant(Left) || allConstant(Right)) {
+        // The first or second argument is constant, merge vertically
+        // %A = shufflevector <n x ty> %a, <n x ty> <...>, <m x i32> <...>
+        newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
+        newBundleDecision(VL);  // Default bundle decision: Lane-widening operands
         buildTree_rec(Left, Depth + 1, UserTreeIdx);
         buildTree_rec(Right, Depth + 1, UserTreeIdx);
         return;
       }
 
-      for (unsigned i = 0, e = VL0->getNumOperands(); i < e; ++i) {
-        ValueList Operands;
-        // Prepare the operand vector.
-        for (Value *j : VL)
-          Operands.push_back(cast<Instruction>(j)->getOperand(i));
+      // TODO: Search recursively for optimal bundles, with backtracking
 
-        buildTree_rec(Operands, Depth + 1, UserTreeIdx);
-      }
+      BS.cancelScheduling(VL, VL0);
+      newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
+      LLVM_DEBUG(dbgs() << "Revec: ShuffleVector are not vectorized.\n");
       return;
-
+    }
     default:
       BS.cancelScheduling(VL, VL0);
       newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
@@ -1938,6 +1999,37 @@ bool BoUpSLP::areAllUsersVectorized(Instruction *I) const {
            return ScalarToTreeEntry.count(U) > 0;
          });
 }
+
+
+int BoUpSLP::getShuffleCost(VectorType *Op0Ty, VectorType *Op1Ty, VectorType *MaskTy) {
+  VectorType *ShufTy = VectorType::get(Op0Ty->getElementType(), MaskTy->getNumElements());
+  if (MaskTy->getNumElements() == Op0Ty->getNumElements())
+    // TODO: If we can determine that Op1Ty is undef, add a special case for 
+    return TTI->getShuffleCost(TargetTransformInfo::SK_Select, ShufTy);
+
+  return TTI->getShuffleCost(TargetTransformInfo::SK_PermuteTwoSrc, ShufTy);
+}
+
+#if 0
+int BoUpSLP::getShuffleCost(ShuffleVectorInst *I) {
+  Value *Op0 = I->getOperand(0);
+  VectorType *Op0Ty = cast<VectorType>(Op0->getType());
+  VectorType *MaskTy = cast<VectorType>(I->getMask()->getType());
+
+  if (MaskTy->getNumElements() == Op0Ty->getNumElements()) {
+    Value *Op1 = I->getOperand(1);
+    if (dyn_cast<UndefValue>(Op1))
+      return TTI->getShuffleCost(TargetTransformInfo::SK_PermuteSingleSrc, I->getType());
+    else
+      return TTI->getShuffleCost(TargetTransformInfo::SK_Select, I->getType());
+  }
+
+  // The output is a different size than the operands
+  return TTI->getShuffleCost(TargetTransformInfo::SK_PermuteTwoSrc, I->getType());
+
+  // return TTI->getArithmeticInstrCost(I->getOpcode(), ElementTy, Op1VK, Op2VK);
+}
+#endif
 
 int BoUpSLP::getEntryCost(TreeEntry *E) {
   ArrayRef<Value*> VL = E->Scalars;
@@ -2246,64 +2338,72 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       return ReuseShuffleCost + FusedVecCallCost - NarrowVecCallCost;
     }
     case Instruction::ShuffleVector: {
-      const TargetTransformInfo::OperandValueKind Op1VK =
-          TargetTransformInfo::OK_AnyValue;
-      const TargetTransformInfo::OperandValueKind Op2VK =
-          TargetTransformInfo::OK_AnyValue;
-
+      int ReuseShuffleCost = 0;
       if (NeedToShuffleReuses) {
         for (unsigned Idx : E->ReuseShuffleIndices) {
           Instruction *I = cast<Instruction>(VL[Idx]);
-          if (!I)
-            continue;
-          ReuseShuffleCost -= TTI->getArithmeticInstrCost(
-              I->getOpcode(), ElementTy, Op1VK, Op2VK);
+          ReuseShuffleCost -= TTI->getInstructionCost(
+              I, TargetTransformInfo::TCK_RecipThroughput);
         }
         for (Value *V : VL) {
           Instruction *I = cast<Instruction>(V);
-          if (!I)
-            continue;
-          ReuseShuffleCost += TTI->getArithmeticInstrCost(
-              I->getOpcode(), ElementTy, Op1VK, Op2VK);
+          ReuseShuffleCost += TTI->getInstructionCost(
+              I, TargetTransformInfo::TCK_RecipThroughput);
         }
       }
 
-      int NarrowVecCost = 0;
-      LLVM_DEBUG(dbgs() << "Revec: Getting cost of shuffle vector bundle starting with " << VL[0] << "\n");
-      for (Value *i : VL) {
-        Instruction *I = cast<Instruction>(i);
-        if (!I)
-          break;
+      if (S.IsAltShuffle) {
+        LLVM_DEBUG(dbgs() << "Revec: Getting cost of alt shuffle of binary operations");
+        assert(Instruction::isBinaryOp(S.Opcode) &&
+               Instruction::isBinaryOp(getAltOpcode(S.Opcode)) &&
+               "Invalid Shuffle Vector Operand");
 
-        LLVM_DEBUG(dbgs() << "Revec:   " << I << "\n");
+        int NarrowVecCost = 0;
+        for (Value *i : VL) {
+          Instruction *I = cast<Instruction>(i);
+          assert(sameOpcodeOrAlt(S.Opcode, getAltOpcode(S.Opcode),
+                                 I->getOpcode()) &&
+                 "Unexpected main/alternate opcode");
+          NarrowVecCost += TTI->getInstructionCost(
+              I, TargetTransformInfo::TCK_RecipThroughput);
+        }
 
-        NarrowVecCost +=
-            TTI->getArithmeticInstrCost(I->getOpcode(), ElementTy, Op1VK, Op2VK);
+        // VecCost is equal to sum of the cost of creating 2 vectors
+        // and the cost of creating shuffle.
+        int VecCost = TTI->getArithmeticInstrCost(S.Opcode, VecTy) +
+                      TTI->getArithmeticInstrCost(S.Opcode, VecTy) +
+                      TTI->getShuffleCost(TargetTransformInfo::SK_Select, VecTy, 0);
+        return ReuseShuffleCost + VecCost - NarrowVecCost;
       }
 
-      // ????: When encountering a shufflevector bundle, do we assume the outputs of
-      // the shuffles will be gathered with a shuffle?
+      LLVM_DEBUG(dbgs() << "Revec: Getting cost of shuffle vector bundle starting with " << VL[0] << "\n");
+      assert(getBundleDecision(VL).hasValue() && "Attempting to get cost of non-vectorized shuffle bundle");
 
-      // TODO: What if the bundle contains more than 2 shuffles?
-      // TODO: Update after the shuffle search is implemented. What heuristic should be used then?
+      int NarrowVecCost = 0;
+      for (Value *i : VL) {
+        ShuffleVectorInst *I = cast<ShuffleVectorInst>(i);
+        LLVM_DEBUG(dbgs() << "Revec:   " << *I << "\n");
 
-      // FusedVecCost is equal to sum of the cost of creating 2 vectors
-      // and the cost of creating shuffle.
-      const unsigned I0_opcode = cast<Instruction>(VL[0])->getOpcode();
-      const unsigned I1_opcode = cast<Instruction>(VL[1])->getOpcode();
+        // Get the cost of this shuffle by inspecting operands
+        NarrowVecCost +=
+            TTI->getInstructionCost(I, TargetTransformInfo::TCK_RecipThroughput);
+            // getShuffleCost(cast<VectorType>(I->getOperand(0)->getType()),
+            //               cast<VectorType>(I->getOperand(1)->getType()),
+            //               cast<VectorType>(I->getMask()->getType()));
+      }
 
-      const int FusedVecCost =
-          TTI->getArithmeticInstrCost(I0_opcode, VecTy, Op1VK, Op2VK) +
-          TTI->getArithmeticInstrCost(I1_opcode, VecTy, Op1VK, Op2VK) +
-          TTI->getShuffleCost(TargetTransformInfo::SK_PermuteTwoSrc, VecTy, 0);
-          //TTI->getShuffleCost(TargetTransformInfo::SK_Alternate, VecTy, 0);
+      VectorType *WideOp0Ty = getVectorType(VL0->getOperand(0)->getType(), VL.size());
+      VectorType *WideOp1Ty = getVectorType(VL0->getOperand(1)->getType(), VL.size());
+      assert(WideOp0Ty == WideOp1Ty && "Source operands of widened shufflevector should be the same");
+      VectorType *WideMaskTy = getVectorType(cast<ShuffleVectorInst>(VL0)->getMask()->getType(), VL.size());
+      // TODO: improve getShuffleCost to better match TTI->getInstructionCost(Instruction)
+      // OR TODO: Pre-vectorize this bundle and use TTI->getInstructionCost
+      int FusedVecCost = getShuffleCost(WideOp0Ty, WideOp1Ty, WideMaskTy);
 
       return ReuseShuffleCost + FusedVecCost - NarrowVecCost;
     }
     default:
-      // TODO: Restore this commented line when all cases are reenabled
-      // llvm_unreachable("Unknown instruction");
-      return -1;
+      llvm_unreachable("Unknown instruction");
   }
 }
 
@@ -2844,15 +2944,24 @@ Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
 
   Value *gathered;
 
-  if (ExtractInsertGather) {
+  if (allConstant(VL)) {
+    SmallVector<Constant *, 32> constants;
+
+    // Extract scalar constants from each value
+    for (Value *val : VL) {
+      LLVM_DEBUG(dbgs() << "Revec: Extracting scalar constants from value: " << *val << " of type: " << *val->getType() << "\n");
+      ConstantVector *vec = cast<ConstantVector>(val);
+      for (unsigned i = 0, N = vec->getType()->getNumElements(); i < N; ++i)
+        constants.push_back(vec->getOperand(i));
+    }
+
+    // NOTE: as this is a constant, it does not need to be inserted with IRBuilder
+    gathered = ConstantVector::get(constants);
+  } else if (ExtractInsertGather) {
     gathered = Gather_extract_insert(VL, Ty);
   } else {
     assert(isPowerOf2_32(size) && size > 1 && "Gathering value list that is not of a power of two length greater than 1");
     gathered = Gather_rec(VL, Ty, 0, size);
-
-    // Debug implementation, limited to VL of size 2
-    // assert((size == 2u) && "Gathering value list that is not of length two");
-    // gathered = Gather_two(VL[0], VL[1]);
   }
 
   // TODO: Pad vector with undefs if the type does not match?
@@ -3426,59 +3535,122 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       return V;
     }
     case Instruction::ShuffleVector: {
-      ValueList LHSVL, RHSVL;
-      assert(Instruction::isBinaryOp(S.Opcode) &&
-             "Invalid Shuffle Vector Operand");
-      reorderAltShuffleOperands(S.Opcode, E->Scalars, LHSVL, RHSVL);
-      setInsertPointAfterBundle(E->Scalars, VL0);
+      if (S.IsAltShuffle) {
+        ValueList LHSVL, RHSVL;
+        assert(Instruction::isBinaryOp(S.Opcode) &&
+              "Invalid Shuffle Vector Operand");
+        reorderAltShuffleOperands(S.Opcode, E->Scalars, LHSVL, RHSVL);
+        setInsertPointAfterBundle(E->Scalars, VL0);
 
-      Value *LHS = vectorizeTree(LHSVL);
-      Value *RHS = vectorizeTree(RHSVL);
+        Value *LHS = vectorizeTree(LHSVL);
+        Value *RHS = vectorizeTree(RHSVL);
+
+        if (E->VectorizedValue) {
+          LLVM_DEBUG(dbgs() << "Revec: Diamond merged for " << *VL0 << ".\n");
+          return E->VectorizedValue;
+        }
+
+        // Create a vector of LHS op1 RHS
+        Value *V0 = Builder.CreateBinOp(
+            static_cast<Instruction::BinaryOps>(S.Opcode), LHS, RHS);
+
+        unsigned AltOpcode = getAltOpcode(S.Opcode);
+        // Create a vector of LHS op2 RHS
+        Value *V1 = Builder.CreateBinOp(
+            static_cast<Instruction::BinaryOps>(AltOpcode), LHS, RHS);
+
+        // Create shuffle to take alternate operations from the vector.
+        // Also, gather up odd and even scalar ops to propagate IR flags to
+        // each vector operation.
+        ValueList OddScalars, EvenScalars;
+        unsigned e = E->Scalars.size();
+        SmallVector<Constant *, 8> Mask(e);
+        for (unsigned i = 0; i < e; ++i) {
+          if (isOdd(i)) {
+            Mask[i] = Builder.getInt32(e + i);
+            OddScalars.push_back(E->Scalars[i]);
+          } else {
+            Mask[i] = Builder.getInt32(i);
+            EvenScalars.push_back(E->Scalars[i]);
+          }
+        }
+
+        Value *ShuffleMask = ConstantVector::get(Mask);
+        propagateIRFlags(V0, EvenScalars);
+        propagateIRFlags(V1, OddScalars);
+
+        Value *V = Builder.CreateShuffleVector(V0, V1, ShuffleMask);
+        if (Instruction *I = dyn_cast<Instruction>(V))
+          V = propagateMetadata(I, E->Scalars);
+        if (NeedToShuffleReuses) {
+          V = Builder.CreateShuffleVector(V, UndefValue::get(VecTy),
+                                          E->ReuseShuffleIndices, "shuffle");
+        }
+        E->VectorizedValue = V;
+        ++NumVectorInstructions;
+
+        return V;
+      }
+
+      // Collect operand bundles based on cached decision
+      const BundleDecision &LeftIdx = getBundleDecision(E->Scalars).getValue();
+      ValueList LeftBundle, RightBundle;
+      for (unsigned i = 0, Max = E->Scalars.size(); i < Max; ++i) {
+        ShuffleVectorInst *Inst = cast<ShuffleVectorInst>(E->Scalars[i]);
+        LeftBundle.push_back(Inst->getOperand(LeftIdx[i] ? 1 : 0));
+        RightBundle.push_back(Inst->getOperand(LeftIdx[i] ? 0 : 1));
+      }
+
+      setInsertPointAfterBundle(E->Scalars, VL0);
+      Value *Op0 = vectorizeTree(LeftBundle);
+      Value *Op1 = vectorizeTree(RightBundle);
 
       if (E->VectorizedValue) {
         LLVM_DEBUG(dbgs() << "Revec: Diamond merged for " << *VL0 << ".\n");
         return E->VectorizedValue;
       }
 
-      // Create a vector of LHS op1 RHS
-      Value *V0 = Builder.CreateBinOp(
-          static_cast<Instruction::BinaryOps>(S.Opcode), LHS, RHS);
+      // Merge shuffle masks
+      // First, determine the offset each original operand will have in the
+      // final shufflevector.
+      ValueMap<Value *, int> updatedOffsets;
+      int offset = 0;
+      for (Value *val : LeftBundle) {
+        updatedOffsets[val] = offset;
+        offset += val->getType()->getVectorNumElements();
+      }
+      for (Value *val : RightBundle) {
+        updatedOffsets[val] = offset;
+        offset += val->getType()->getVectorNumElements();
+      }
 
-      unsigned AltOpcode = getAltOpcode(S.Opcode);
-      // Create a vector of LHS op2 RHS
-      Value *V1 = Builder.CreateBinOp(
-          static_cast<Instruction::BinaryOps>(AltOpcode), LHS, RHS);
+      // Now, find the original offset of the operands of the bundle and update
+      // the mask
+      SmallVector<Constant *, 16> Mask;
+      for (Value *val : E->Scalars) {
+        ShuffleVectorInst *inst = cast<ShuffleVectorInst>(val);
 
-      // Create shuffle to take alternate operations from the vector.
-      // Also, gather up odd and even scalar ops to propagate IR flags to
-      // each vector operation.
-      ValueList OddScalars, EvenScalars;
-      unsigned e = E->Scalars.size();
-      SmallVector<Constant *, 8> Mask(e);
-      for (unsigned i = 0; i < e; ++i) {
-        if (isOdd(i)) {
-          Mask[i] = Builder.getInt32(e + i);
-          OddScalars.push_back(E->Scalars[i]);
-        } else {
-          Mask[i] = Builder.getInt32(i);
-          EvenScalars.push_back(E->Scalars[i]);
+        Value *narrowOp0 = inst->getOperand(0);
+        int maskShift0 = updatedOffsets[narrowOp0];
+
+        Value *narrowOp1 = inst->getOperand(1);
+        int originalOffset1 = narrowOp0->getType()->getVectorNumElements();
+        int maskShift1 = updatedOffsets[narrowOp1] - originalOffset1;
+
+        for (int maskVal : inst->getShuffleMask()) {
+          if (maskVal < originalOffset1)
+            maskVal += maskShift0; // This mask value indexed operand 0
+          else
+            maskVal += maskShift1; // This mask value indexed operand 1
+
+          Mask.push_back(Builder.getInt32(maskVal));
         }
       }
 
-      Value *ShuffleMask = ConstantVector::get(Mask);
-      propagateIRFlags(V0, EvenScalars);
-      propagateIRFlags(V1, OddScalars);
-
-      Value *V = Builder.CreateShuffleVector(V0, V1, ShuffleMask);
-      if (Instruction *I = dyn_cast<Instruction>(V))
-        V = propagateMetadata(I, E->Scalars);
-      if (NeedToShuffleReuses) {
-        V = Builder.CreateShuffleVector(V, UndefValue::get(VecTy),
-                                        E->ReuseShuffleIndices, "shuffle");
-      }
+      Value *V =
+          Builder.CreateShuffleVector(Op0, Op1, ConstantVector::get(Mask));
       E->VectorizedValue = V;
       ++NumVectorInstructions;
-
       return V;
     }
     default:
