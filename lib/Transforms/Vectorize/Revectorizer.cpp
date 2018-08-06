@@ -285,17 +285,11 @@ static bool sameOpcodeOrAlt(unsigned Opcode, unsigned AltOpcode,
   return Opcode == CheckedOpcode || AltOpcode == CheckedOpcode;
 }
 
-static bool sameBundle(ArrayRef<Value *> VL, ArrayRef<Value *> AltVL) {
-  unsigned BundleSize = VL.size();
-
-  if (BundleSize != AltVL.size())
+static bool isSameBundle(ArrayRef<Value *> VL, ArrayRef<Value *> AltVL) {
+  if (VL.size() != AltVL.size())
     return false;
 
-  for (unsigned i = 0; i < BundleSize; ++i)
-    if (VL[i] != AltVL[i])
-      return false;
-
-  return true;
+  return std::equal(AltVL.begin(), AltVL.end(), VL.begin());
 }
 
 /// Chooses the correct key for scheduling data. If \p Op has the same (or
@@ -703,7 +697,7 @@ private:
 
   Optional<BundleDecision> getBundleDecision(ArrayRef<Value *> VL) {
     for (const auto& BundleAndDecision : BundleDecisionCache)
-      if (sameBundle(VL, BundleAndDecision.first))
+      if (isSameBundle(VL, BundleAndDecision.first))
         return Optional<BundleDecision>(BundleAndDecision.second);
 
     // VL was not found in the decision cache
@@ -1904,18 +1898,21 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
         Right.push_back(I->getOperand(1));
       }
 
-      if (allConstant(Left) || allConstant(Right)) {
-        // The first or second argument is constant, merge vertically
+      if (allConstant(Left) || allConstant(Right) ||
+          (isSplat(Left) && isSplat(Right))) {
+        // The first or second argument is constant, OR the first arguments and
+        // second arguments are identical across instructions. Merge vertically.
         // %A = shufflevector <n x ty> %a, <n x ty> <...>, <m x i32> <...>
         newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
-        newBundleDecision(VL);  // Default bundle decision: Lane-widening operands
+        newBundleDecision(
+            VL); // Default bundle decision: Lane-widening operands
         buildTree_rec(Left, Depth + 1, UserTreeIdx);
         buildTree_rec(Right, Depth + 1, UserTreeIdx);
         return;
       }
 
 #ifndef NDEBUG
-      printf("Revec: unable to vertically bundle shufflevector operands (left or right not allConstant).");
+      printf("Revec: unable to vertically bundle shufflevector operands (left or right not allConstant, or one is not a splat)\n");
 #endif
 
       // TODO: Search recursively for optimal bundles, with backtracking
@@ -2954,9 +2951,15 @@ Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
     // Extract scalar constants from each value
     for (Value *val : VL) {
       LLVM_DEBUG(dbgs() << "Revec: Extracting scalar constants from value: " << *val << " of type: " << *val->getType() << "\n");
-      ConstantVector *vec = cast<ConstantVector>(val);
-      for (unsigned i = 0, N = vec->getType()->getNumElements(); i < N; ++i)
-        constants.push_back(vec->getOperand(i));
+      assert(val->getType()->isAggregateType() && "Cannot get scalar constants from non-aggregate type.");
+      Constant *vec = cast<Constant>(val);
+
+      unsigned i = 0;
+      Constant *scalar = nullptr;
+      while ((scalar = vec->getAggregateElement(i))) {
+        constants.push_back(scalar);
+        i++;
+      }
     }
 
     // NOTE: as this is a constant, it does not need to be inserted with IRBuilder
