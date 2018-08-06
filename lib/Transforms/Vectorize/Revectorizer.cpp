@@ -693,22 +693,35 @@ private:
   };
 
   using BundleDecision = std::bitset<MaxBundleSize>;
-  SmallVector<std::pair<ArrayRef<Value *>, BundleDecision>, 32> BundleDecisionCache;
+  using BundleDecisionPair = std::pair<ArrayRef<Value *>, BundleDecision>;
+  std::vector<BundleDecisionPair> BundleDecisionCache;
 
+#if 0
   Optional<BundleDecision> getBundleDecision(ArrayRef<Value *> VL) {
-    for (const auto& BundleAndDecision : BundleDecisionCache)
+    for (BundleDecisionPair BundleAndDecision : BundleDecisionCache)
       if (isSameBundle(VL, BundleAndDecision.first))
         return Optional<BundleDecision>(BundleAndDecision.second);
 
     // VL was not found in the decision cache
     return Optional<BundleDecision>();
   }
+#else
+  BundleDecision getBundleDecision(ArrayRef<Value *> VL) {
+    for (BundleDecisionPair BundleAndDecision : BundleDecisionCache)
+      if (isSameBundle(VL, BundleAndDecision.first))
+          return BundleAndDecision.second;
 
-  inline void newBundleDecision(ArrayRef<Value *> VL, BundleDecision operandIndices) {
-    BundleDecisionCache.emplace_back(VL, operandIndices);
+    assert(false && "Missing key: VL not present in the bundle decision cache");
+  }
+#endif
+
+  void newBundleDecision(ArrayRef<Value *> VL, BundleDecision operandIndices) {
+    // TODO: Switch to emplace_back
+    BundleDecisionPair toCache(VL, operandIndices);
+    BundleDecisionCache.push_back(toCache);
   }
 
-  inline void newBundleDecision(ArrayRef<Value *> VL) {
+  void newBundleDecision(ArrayRef<Value *> VL) {
     BundleDecision laneWideningDecision;
     newBundleDecision(VL, laneWideningDecision);
   }
@@ -2377,8 +2390,12 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
         return ReuseShuffleCost + VecCost - NarrowVecCost;
       }
 
-      LLVM_DEBUG(dbgs() << "Revec: Getting cost of shuffle vector bundle starting with " << VL[0] << "\n");
-      assert(getBundleDecision(VL).hasValue() && "Attempting to get cost of non-vectorized shuffle bundle");
+      LLVM_DEBUG(dbgs() << "Revec: Getting cost of shuffle vector bundle:\n");
+#ifndef DEBUG
+      for (Value *val : VL)
+          LLVM_DEBUG(dbgs() << "Revec:   " << *val << "\n");
+#endif
+      // assert(getBundleDecision(VL).hasValue() && "Attempting to get cost of non-vectorized shuffle bundle");
 
       int NarrowVecCost = 0;
       for (Value *i : VL) {
@@ -2951,12 +2968,13 @@ Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
     // Extract scalar constants from each value
     for (Value *val : VL) {
       LLVM_DEBUG(dbgs() << "Revec: Extracting scalar constants from value: " << *val << " of type: " << *val->getType() << "\n");
-      assert(val->getType()->isAggregateType() && "Cannot get scalar constants from non-aggregate type.");
+      // assert(val->getType()->isAggregateType() && "Cannot get scalar constants from non-aggregate type.");
       Constant *vec = cast<Constant>(val);
 
       unsigned i = 0;
       Constant *scalar = nullptr;
       while ((scalar = vec->getAggregateElement(i))) {
+        LLVM_DEBUG(dbgs() << "Revec:     " << *scalar << "\n");
         constants.push_back(scalar);
         i++;
       }
@@ -3600,7 +3618,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       }
 
       // Collect operand bundles based on cached decision
-      const BundleDecision &LeftIdx = getBundleDecision(E->Scalars).getValue();
+      const BundleDecision &LeftIdx = getBundleDecision(E->Scalars);
       ValueList LeftBundle, RightBundle;
       for (unsigned i = 0, Max = E->Scalars.size(); i < Max; ++i) {
         ShuffleVectorInst *Inst = cast<ShuffleVectorInst>(E->Scalars[i]);
