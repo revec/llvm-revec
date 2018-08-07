@@ -361,6 +361,7 @@ struct InstructionsState {
 
 } // end anonymous namespace
 
+#if 1
 /// \returns analysis of the Instructions in \p VL described in
 /// InstructionsState, the Opcode that we suppose the whole list 
 /// could be vectorized even if its structure is diverse.
@@ -385,6 +386,36 @@ static InstructionsState getSameOpcode(ArrayRef<Value *> VL) {
   }
   return InstructionsState(OpInst, Opcode, Res.HasAltOpcodes);
 }
+#else
+/// \returns analysis of the Instructions in \p VL described in
+/// InstructionsState, the Opcode that we suppose the whole list 
+/// could be vectorized even if its structure is diverse.
+static InstructionsState getSameOpcode(ArrayRef<Value *> VL) {
+  auto Res = getMainOpcode(VL);
+  unsigned Opcode = Res.Opcode;
+  if (Res.HasAltOpcodes) {
+    auto *OpInst = cast<Instruction>(VL[0]);
+    unsigned AltOpcode = getAltOpcode(Opcode);
+    // Examine each element in the list instructions VL to determine
+    // if some operations there could be considered as an alternative
+    // (for example as subtraction relates to addition operation).
+    for (int Cnt = 0, E = VL.size(); Cnt < E; Cnt++) {
+      auto *I = cast<Instruction>(VL[Cnt]);
+      unsigned InstOpcode = I->getOpcode();
+      // if ((Res.HasAltOpcodes &&
+      //     InstOpcode != (isOdd(Cnt) ? AltOpcode : Opcode)) ||
+      //     (!Res.HasAltOpcodes && InstOpcode != Opcode)) {
+      if (InstOpcode != (isOdd(Cnt) ? AltOpcode : Opcode))
+        return InstructionsState(OpInst, 0, false);
+    }
+    return InstructionsState(OpInst, Opcode, Res.HasAltOpcodes);
+  }
+
+  // TODO: Check for shufflevector special case:
+  //        - merge without widening operands, only the mask
+  return InstructionsState(VL[0], Opcode, false);
+}
+#endif
 
 /// \returns true if all of the values in \p VL have the same type or false
 /// otherwise.
@@ -457,6 +488,65 @@ static bool isSimple(Instruction *I) {
   return true;
 }
 
+
+#if 0
+static bool canMergeConstants(ArrayRef<Value *> VL) {
+  Type *Ty0 = VL[0]->getType();
+  VectorType *VecTy0 = dyn_cast<VectorType>(Ty0);
+
+  // Check that all constants have the same vector type
+  if (!VecTy0)
+    return false;
+
+  for (Value *val : VL) {
+    Constant *C = cast<Constant>(val);
+    if (C->getType() != Ty0)
+      return false;
+  }
+
+  // Check that there is only one non-undef value per index
+
+
+  return true;
+}
+#endif
+
+static Constant *mergeIfConstantVectors(ArrayRef<Value *> Operands) {
+  // Operands must be constants of the same type to be merged
+  if (!allConstant(Operands) || !allSameType(Operands))
+    return nullptr;
+
+  // All operands must be vectors
+  const VectorType *VecTy = dyn_cast<VectorType>(Operands[0]->getType());
+  if (!VecTy)
+    return nullptr;
+
+  Type *ElTy = VecTy->getElementType();
+  const unsigned NumElt = VecTy->getNumElements();
+
+  // Initialize a vector of UndefValue
+  SmallVector<Constant *, 32> merged;
+  for (unsigned i = 0; i < NumElt; ++i)
+    merged.push_back(UndefValue::get(ElTy));
+  
+  for (Value *V : Operands) {
+    const Constant *CVec = cast<Constant>(V);
+
+    for (unsigned i = 0; i < NumElt; ++i) {
+      Constant *nextScalar = CVec->getAggregateElement(i);
+
+      if (dyn_cast<UndefValue>(nextScalar) != nullptr) {
+        if (dyn_cast<UndefValue>(merged[i]) != nullptr)
+          // Lane i has more than one non-undef value in the opreands
+          return nullptr;
+
+        merged[i] = nextScalar;
+      }
+    }
+  }
+
+  return ConstantVector::get(merged);
+}
 
 namespace llvm {
 
@@ -692,38 +782,73 @@ private:
     SmallVector<int, 1> UserTreeIndices;
   };
 
-  using BundleDecision = std::bitset<MaxBundleSize>;
-  using BundleDecisionPair = std::pair<ArrayRef<Value *>, BundleDecision>;
-  std::vector<BundleDecisionPair> BundleDecisionCache;
+  using OperandIndices = std::bitset<MaxBundleSize>;
 
-#if 0
-  Optional<BundleDecision> getBundleDecision(ArrayRef<Value *> VL) {
-    for (BundleDecisionPair BundleAndDecision : BundleDecisionCache)
-      if (isSameBundle(VL, BundleAndDecision.first))
-        return Optional<BundleDecision>(BundleAndDecision.second);
+  struct ShuffleBundleDecision {
+    enum {
+      // Gather shufflevectors
+      Gather = 0,
 
-    // VL was not found in the decision cache
-    return Optional<BundleDecision>();
-  }
+      // Collect operands by a bitmask specifying the left bundle
+      IndexOp0_IndexOp1_WidenMask = 1,
+
+      // Take Op0 and Op1 from the first shufflevector, and concatenate masks
+      // Example:
+      //   %a = shufflevector <n x ty> %op0, <n x ty> %op1, <m x ty> <MASK_A>
+      //   %b = shufflevector <n x ty> %op0, <n x ty> %op1, <m x ty> <MASK_B>
+      //     =>
+      //   %ab = shufflevector <n x ty> %op0, <n x ty> %op1, <2m x ty> <concat(MASK_A, MASK_B)>
+      FirstOp0_FirstOp1_ConcatenateMask = 2,
+
+      // Take Op0 from the first shufflevector, merge the first operand vertically, and concatenate masks.
+      // Example:
+      //   %a = shufflevector <8 x i8> %33, <8 x i8> <i8 1, i8 1, i8 undef, i8 undef, i8 1, i8 1, i8 undef, i8 undef>, <8 x i32> <i32 0, i32 8, i32 1, i32 9, i32 2, i32 10, i32 3, i32 11>
+      //   %b = shufflevector <8 x i8> %33, <8 x i8> <i8 undef, i8 undef, i8 1, i8 1, i8 undef, i8 undef, i8 1, i8 1>, <8 x i32> <i32 4, i32 12, i32 5, i32 13, i32 6, i32 14, i32 7, i32 15>
+      //     =>
+      //   %ab = shufflevector <8 x i8> %33, <8 x i8> <i8 1, i8 1, i8 1, i8 1, i8 1, i8 1, i8 1, i8 1>, <16 x i32> <i32 0, i32 8, i32 1, i32 9, i32 2, i32 10, i32 3, i32 11, i32 4, i32 12, i32 5, i32 13, i32 6, i32 14, i32 7, i32 15>
+      FirstOp0_MergeOp1_ConcatenateMask = 3
+    };
+
+    /// Encodes a merger strategy for the bundle of ShuffleVectors
+    int MergeMode;
+    /// Vector values in this bundle
+    ArrayRef<Value *> VL;
+    /// A mask that specifies the operand of each element of the bundle to merge
+    /// into the first operand of the widened shufflevector.
+    OperandIndices Op0Indices = 0ULL;
+    /// If operand 1 is precomputed in buildTree when making a vectorization decision,
+    /// it may be stored here. In particular, this is expected for FirstOp0_MergeOp1_ConcatenateMask
+    Value *Op1Value = nullptr;
+
+    ShuffleBundleDecision(ArrayRef<Value *> VL, int MergeMode)
+        : MergeMode(MergeMode),
+          VL(VL) {};
+
+    ShuffleBundleDecision(ArrayRef<Value *> VL, OperandIndices Op0Indices)
+        : MergeMode(IndexOp0_IndexOp1_WidenMask),
+          VL(VL),
+          Op0Indices(Op0Indices) {};
+
+    ShuffleBundleDecision(ArrayRef<Value *> VL, Value *Op1Value)
+        : MergeMode(FirstOp0_MergeOp1_ConcatenateMask),
+          VL(VL),
+          Op1Value(Op1Value) {};
+  };
+
+  SmallVector<ShuffleBundleDecision, 32> ShuffleCache;
+
+  ShuffleBundleDecision getShuffleBundleDecision(ArrayRef<Value *> VL) {
+    for (ShuffleBundleDecision decision : ShuffleCache)
+      if (isSameBundle(VL, decision.VL))
+        return decision;
+    
+#if 1
+    LLVM_DEBUG(dbgs() << "Revec: Shuffle bundle decision not found for bundle starting with " << *VL[0] << "\n");
+    ShuffleCache.emplace_back(VL, ShuffleBundleDecision::Gather);
+    return ShuffleCache.back();
 #else
-  BundleDecision getBundleDecision(ArrayRef<Value *> VL) {
-    for (BundleDecisionPair BundleAndDecision : BundleDecisionCache)
-      if (isSameBundle(VL, BundleAndDecision.first))
-          return BundleAndDecision.second;
-
-    assert(false && "Missing key: VL not present in the bundle decision cache");
-  }
+    assert(false && "Missing key: VL not present in the shuffle bundle decision cache");
 #endif
-
-  void newBundleDecision(ArrayRef<Value *> VL, BundleDecision operandIndices) {
-    // TODO: Switch to emplace_back
-    BundleDecisionPair toCache(VL, operandIndices);
-    BundleDecisionCache.push_back(toCache);
-  }
-
-  void newBundleDecision(ArrayRef<Value *> VL) {
-    BundleDecision laneWideningDecision;
-    newBundleDecision(VL, laneWideningDecision);
   }
 
   /// Create a new VectorizableTree entry.
@@ -1881,7 +2006,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
     case Instruction::ShuffleVector: {
       if (S.IsAltShuffle) {
         newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
-        LLVM_DEBUG(dbgs() << "Revec: added a ShuffleVector op.\n");
+        LLVM_DEBUG(dbgs() << "Revec: added a ShuffleVector op for alt shuffle.\n");
 
         // Reorder operands if reordering would enable vectorization.
         if (isa<BinaryOperator>(VL0)) {
@@ -1905,34 +2030,55 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
 
       // Check for special cases with an optimal vectorization decision
       ValueList Left, Right;
+      // SmallVector<Constant *, 8U> Masks;
       for (Value *V : VL) {
-        Instruction *I = cast<Instruction>(V);
+        ShuffleVectorInst *I = cast<ShuffleVectorInst>(V);
         Left.push_back(I->getOperand(0));
         Right.push_back(I->getOperand(1));
+        // Masks.push_back(I->getMask());
       }
 
-      if (allConstant(Left) || allConstant(Right) ||
-          (isSplat(Left) && isSplat(Right))) {
-        // The first or second argument is constant, OR the first arguments and
-        // second arguments are identical across instructions. Merge vertically.
-        // %A = shufflevector <n x ty> %a, <n x ty> <...>, <m x i32> <...>
+      if (isSplat(Left)) {
+        if (isSplat(Right)) {
+          // Left and right can be trivially merged by taking operands of VL[0]
+          // The masks will be concatenated
+          ShuffleCache.emplace_back(VL, ShuffleBundleDecision::FirstOp0_FirstOp1_ConcatenateMask);
+          newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
+          LLVM_DEBUG(dbgs() << "Revec: added a ShuffleVector op for mode FirstOp0_FirstOp1_ConcatenateMask.\n");
+          return;
+        }
+
+        Constant *MergedOp1 = mergeIfConstantVectors(Right);
+        if (MergedOp1) {
+          // Left is merged by taking operand 0 from VL[0]
+          // Right is merged by taking non-undefined elements from each lane
+          ShuffleCache.emplace_back(VL, MergedOp1);
+          newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
+          LLVM_DEBUG(dbgs() << "Revec: added a ShuffleVector op for mode "
+                                "FirstOp0_MergeOp1_ConcatentateMask.\n");
+          return;
+        }
+      }
+
+      if (allConstant(Right) || allConstant(Left)) {
+        // Widen operands vertically, and merge shuffle masks
+        ShuffleCache.emplace_back(VL, ShuffleBundleDecision::IndexOp0_IndexOp1_WidenMask);
         newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
-        newBundleDecision(
-            VL); // Default bundle decision: Lane-widening operands
         buildTree_rec(Left, Depth + 1, UserTreeIdx);
         buildTree_rec(Right, Depth + 1, UserTreeIdx);
         return;
       }
 
+      // Default to a gather if we haven't encountered a special case.
+      // TODO: Search recursively for optimal bundle indexes, with backtracking
 #ifndef NDEBUG
-      printf("Revec: unable to vertically bundle shufflevector operands (left or right not allConstant, or one is not a splat)\n");
+      LLVM_DEBUG(dbgs() << "Revec: non-vectorizable ShuffleVector bundle.\n");
+      for (Value *val : VL)
+        LLVM_DEBUG(dbgs() << "   " << *val << "\n");
 #endif
-
-      // TODO: Search recursively for optimal bundles, with backtracking
-
+      ShuffleCache.emplace_back(VL, ShuffleBundleDecision::Gather);
       BS.cancelScheduling(VL, VL0);
       newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
-      LLVM_DEBUG(dbgs() << "Revec: ShuffleVector are not vectorized.\n");
       return;
     }
     default:
@@ -3618,62 +3764,101 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       }
 
       // Collect operand bundles based on cached decision
-      const BundleDecision &LeftIdx = getBundleDecision(E->Scalars);
-      ValueList LeftBundle, RightBundle;
-      for (unsigned i = 0, Max = E->Scalars.size(); i < Max; ++i) {
-        ShuffleVectorInst *Inst = cast<ShuffleVectorInst>(E->Scalars[i]);
-        LeftBundle.push_back(Inst->getOperand(LeftIdx[i] ? 1 : 0));
-        RightBundle.push_back(Inst->getOperand(LeftIdx[i] ? 0 : 1));
+      Value *V = nullptr;
+      const ShuffleBundleDecision &decision = getShuffleBundleDecision(E->Scalars);
+
+      if (decision.MergeMode == ShuffleBundleDecision::IndexOp0_IndexOp1_WidenMask) {
+        ValueList LeftBundle, RightBundle;
+        for (unsigned i = 0, Max = E->Scalars.size(); i < Max; ++i) {
+          ShuffleVectorInst *Inst = cast<ShuffleVectorInst>(E->Scalars[i]);
+          LeftBundle.push_back(
+              Inst->getOperand(decision.Op0Indices[i] ? 1 : 0));
+          RightBundle.push_back(
+              Inst->getOperand(decision.Op0Indices[i] ? 0 : 1));
+        }
+
+        setInsertPointAfterBundle(E->Scalars, VL0);
+        Value *Op0 = vectorizeTree(LeftBundle);
+        Value *Op1 = vectorizeTree(RightBundle);
+
+        // Merge shuffle masks. First, determine the offset each original
+        // operand will have in the final shufflevector.
+        ValueMap<Value *, int> updatedOffsets;
+        int offset = 0;
+        for (Value *val : LeftBundle) {
+          updatedOffsets[val] = offset;
+          offset += val->getType()->getVectorNumElements();
+        }
+        for (Value *val : RightBundle) {
+          updatedOffsets[val] = offset;
+          offset += val->getType()->getVectorNumElements();
+        }
+
+        // Now, find the original offset of the operands of the bundle and
+        // update the mask
+        SmallVector<Constant *, 16> Mask;
+        for (Value *val : E->Scalars) {
+          ShuffleVectorInst *inst = cast<ShuffleVectorInst>(val);
+
+          Value *narrowOp0 = inst->getOperand(0);
+          int maskShift0 = updatedOffsets[narrowOp0];
+
+          Value *narrowOp1 = inst->getOperand(1);
+          int originalOffset1 = narrowOp0->getType()->getVectorNumElements();
+          int maskShift1 = updatedOffsets[narrowOp1] - originalOffset1;
+
+          for (int maskVal : inst->getShuffleMask()) {
+            if (maskVal < originalOffset1)
+              maskVal += maskShift0; // This mask value indexed operand 0
+            else
+              maskVal += maskShift1; // This mask value indexed operand 1
+
+            Mask.push_back(Builder.getInt32(maskVal));
+          }
+        }
+
+        V = Builder.CreateShuffleVector(Op0, Op1, ConstantVector::get(Mask));
+      } else if (decision.MergeMode == ShuffleBundleDecision::Gather) {
+#ifndef NDEBUG
+        printf("Revec: ERROR: Unexpectedly gathering shuffle bundle. E->NeedToGather = %d\n", E->NeedToGather);
+        LLVM_DEBUG(dbgs() << "Revec: ERROR: Unexpectedly gathering shuffle bundle. E->NeedToGather = " << E->NeedToGather << "\n");
+        for (Value *val : E->Scalars)
+          LLVM_DEBUG(dbgs() << "Revec:   " << *val);
+#endif
+      } else {
+        assert((decision.MergeMode ==
+                    ShuffleBundleDecision::FirstOp0_FirstOp1_ConcatenateMask ||
+                decision.MergeMode ==
+                    ShuffleBundleDecision::FirstOp0_MergeOp1_ConcatenateMask) &&
+               "Unknown shuffle bundle merge mode");
+
+        // Concatenate masks
+        SmallVector<Constant *, 32> wideMask;
+        for (Value *narrowVec : E->Scalars) {
+          ShuffleVectorInst *narrowInst = cast<ShuffleVectorInst>(narrowVec);
+          Constant *narrowMask = narrowInst->getMask();
+          unsigned i = 0;
+          while (Constant *scalar = narrowMask->getAggregateElement(i++))
+            wideMask.push_back(scalar);
+        }
+
+        // Get the first operand
+        ShuffleVectorInst *FirstInst = cast<ShuffleVectorInst>(E->Scalars[0]);
+        Value *Op0 = FirstInst->getOperand(0);
+        Value *Op1 = (decision.MergeMode == ShuffleBundleDecision::FirstOp0_FirstOp1_ConcatenateMask)
+                         ? FirstInst->getOperand(1) // Simply use the first shuffle's operand 1
+                         : decision.Op1Value; // The merged operand 1 was precomputed in buildTree_rec
+
+        V = Builder.CreateShuffleVector(Op0, Op1, ConstantVector::get(wideMask));
       }
 
-      setInsertPointAfterBundle(E->Scalars, VL0);
-      Value *Op0 = vectorizeTree(LeftBundle);
-      Value *Op1 = vectorizeTree(RightBundle);
-
       if (E->VectorizedValue) {
+        // TODO: Can this happen? Does it need to happen after dispatching calls to vectorizeTree?
         LLVM_DEBUG(dbgs() << "Revec: Diamond merged for " << *VL0 << ".\n");
         return E->VectorizedValue;
       }
 
-      // Merge shuffle masks
-      // First, determine the offset each original operand will have in the
-      // final shufflevector.
-      ValueMap<Value *, int> updatedOffsets;
-      int offset = 0;
-      for (Value *val : LeftBundle) {
-        updatedOffsets[val] = offset;
-        offset += val->getType()->getVectorNumElements();
-      }
-      for (Value *val : RightBundle) {
-        updatedOffsets[val] = offset;
-        offset += val->getType()->getVectorNumElements();
-      }
-
-      // Now, find the original offset of the operands of the bundle and update
-      // the mask
-      SmallVector<Constant *, 16> Mask;
-      for (Value *val : E->Scalars) {
-        ShuffleVectorInst *inst = cast<ShuffleVectorInst>(val);
-
-        Value *narrowOp0 = inst->getOperand(0);
-        int maskShift0 = updatedOffsets[narrowOp0];
-
-        Value *narrowOp1 = inst->getOperand(1);
-        int originalOffset1 = narrowOp0->getType()->getVectorNumElements();
-        int maskShift1 = updatedOffsets[narrowOp1] - originalOffset1;
-
-        for (int maskVal : inst->getShuffleMask()) {
-          if (maskVal < originalOffset1)
-            maskVal += maskShift0; // This mask value indexed operand 0
-          else
-            maskVal += maskShift1; // This mask value indexed operand 1
-
-          Mask.push_back(Builder.getInt32(maskVal));
-        }
-      }
-
-      Value *V =
-          Builder.CreateShuffleVector(Op0, Op1, ConstantVector::get(Mask));
+      assert(V && "Unable to merge shuffles");
       E->VectorizedValue = V;
       ++NumVectorInstructions;
       return V;
