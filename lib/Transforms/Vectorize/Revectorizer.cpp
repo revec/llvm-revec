@@ -2162,11 +2162,13 @@ bool BoUpSLP::areAllUsersVectorized(Instruction *I) const {
 
 
 int BoUpSLP::getShuffleCost(VectorType *Op0Ty, VectorType *Op1Ty, VectorType *MaskTy) {
+  assert(Op0Ty == Op1Ty && "Source operands of shufflevector must be the same");
+
   VectorType *ShufTy = VectorType::get(Op0Ty->getElementType(), MaskTy->getNumElements());
   if (MaskTy->getNumElements() == Op0Ty->getNumElements())
-    // TODO: If we can determine that Op1Ty is undef, add a special case for 
     return TTI->getShuffleCost(TargetTransformInfo::SK_Select, ShufTy);
 
+  // TODO: If we can determine that Op1Ty is undef, add a special case for SK_PermuteSingleSrc
   return TTI->getShuffleCost(TargetTransformInfo::SK_PermuteTwoSrc, ShufTy);
 }
 
@@ -2556,13 +2558,34 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
             //               cast<VectorType>(I->getMask()->getType()));
       }
 
-      VectorType *WideOp0Ty = getVectorType(VL0->getOperand(0)->getType(), VL.size());
-      VectorType *WideOp1Ty = getVectorType(VL0->getOperand(1)->getType(), VL.size());
-      assert(WideOp0Ty == WideOp1Ty && "Source operands of widened shufflevector should be the same");
-      VectorType *WideMaskTy = getVectorType(cast<ShuffleVectorInst>(VL0)->getMask()->getType(), VL.size());
       // TODO: improve getShuffleCost to better match TTI->getInstructionCost(Instruction)
       // OR TODO: Pre-vectorize this bundle and use TTI->getInstructionCost
-      int FusedVecCost = getShuffleCost(WideOp0Ty, WideOp1Ty, WideMaskTy);
+
+      const auto& decision = getShuffleBundleDecision(VL);
+
+      VectorType *WideMaskTy = getVectorType(cast<ShuffleVectorInst>(VL0)->getMask()->getType(), VL.size());
+
+      int FusedVecCost = 0;
+      switch (decision.MergeMode) {
+        case ShuffleBundleDecision::IndexOp0_IndexOp1_WidenMask: {
+          VectorType *WideOp0Ty = getVectorType(VL0->getOperand(0)->getType(), VL.size());
+          VectorType *WideOp1Ty = getVectorType(VL0->getOperand(1)->getType(), VL.size());
+          FusedVecCost = getShuffleCost(WideOp0Ty, WideOp1Ty, WideMaskTy);
+          break;
+        }
+        case ShuffleBundleDecision::FirstOp0_FirstOp1_ConcatenateMask:
+        case ShuffleBundleDecision::FirstOp0_MergeOp1_ConcatenateMask: {
+          VectorType *NarrowOp0Ty = cast<VectorType>(VL0->getOperand(0)->getType());
+          VectorType *NarrowOp1Ty = cast<VectorType>(VL0->getOperand(0)->getType());
+          FusedVecCost = getShuffleCost(NarrowOp0Ty, NarrowOp1Ty, WideMaskTy);
+          break;
+        }
+        case ShuffleBundleDecision::Gather:
+          FusedVecCost = NarrowVecCost + getGatherCost(VL);
+          break;
+        default:
+          llvm_unreachable("Unrecognized decision type");
+      }
 
       return ReuseShuffleCost + FusedVecCost - NarrowVecCost;
     }
@@ -3825,6 +3848,17 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
         for (Value *val : E->Scalars)
           LLVM_DEBUG(dbgs() << "Revec:   " << *val);
 #endif
+
+        setInsertPointAfterBundle(E->Scalars, VL0);
+        V = Gather(E->Scalars, VecTy);
+        if (NeedToShuffleReuses) {
+          V = Builder.CreateShuffleVector(V, UndefValue::get(VecTy),
+                                          E->ReuseShuffleIndices, "shufflegather");
+          if (auto *I = dyn_cast<Instruction>(V)) {
+            GatherSeq.insert(I);
+            CSEBlocks.insert(I->getParent());
+          }
+        }
       } else {
         assert((decision.MergeMode ==
                     ShuffleBundleDecision::FirstOp0_FirstOp1_ConcatenateMask ||
