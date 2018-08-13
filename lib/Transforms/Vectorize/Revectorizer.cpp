@@ -285,13 +285,6 @@ static bool sameOpcodeOrAlt(unsigned Opcode, unsigned AltOpcode,
   return Opcode == CheckedOpcode || AltOpcode == CheckedOpcode;
 }
 
-static bool isSameBundle(ArrayRef<Value *> VL, ArrayRef<Value *> AltVL) {
-  if (VL.size() != AltVL.size())
-    return false;
-
-  return std::equal(AltVL.begin(), AltVL.end(), VL.begin());
-}
-
 /// Chooses the correct key for scheduling data. If \p Op has the same (or
 /// alternate) opcode as \p OpValue, the key is \p Op. Otherwise the key is \p
 /// OpValue.
@@ -812,8 +805,7 @@ private:
     /// Encodes a merger strategy for the bundle of ShuffleVectors
     int MergeMode;
     /// Vector values in this bundle
-    //ArrayRef<Value *> VL;
-    std::pair<Value *, Value *> VL01;
+    SmallVector<Value *, 32> VL;
     unsigned BundleSize = 0;
     /// A mask that specifies the operand of each element of the bundle to merge
     /// into the first operand of the widened shufflevector.
@@ -822,24 +814,11 @@ private:
     /// it may be stored here. In particular, this is expected for FirstOp0_MergeOp1_ConcatenateMask
     Value *Op1Value = nullptr;
 
-    //explicit ShuffleBundleDecision(ArrayRef<Value *> VL, int MergeMode)
-    //    : MergeMode(MergeMode),
-    //      VL(VL) {};
-
-    //explicit ShuffleBundleDecision(ArrayRef<Value *> VL, OperandIndices Op0Indices)
-    //    : MergeMode(IndexOp0_IndexOp1_WidenMask),
-    //      VL(VL),
-    //      Op0Indices(Op0Indices) {};
-
-    //explicit ShuffleBundleDecision(ArrayRef<Value *> VL, Value *Op1Value)
-    //    : MergeMode(FirstOp0_MergeOp1_ConcatenateMask),
-    //      VL(VL),
-    //      Op1Value(Op1Value) {};
-
     explicit ShuffleBundleDecision(ArrayRef<Value *> VL, int MergeMode, OperandIndices Op0Indices, Value *Op1Value) {
-      //this->VL = VL;
       this->BundleSize = VL.size();
-      VL01 = std::make_pair(VL[0], VL[1]);
+      for (Value *val : VL)
+        this->VL.push_back(val);
+      assert((this->VL.size() == this->BundleSize) && "Unable to copy all values on ShuffleBundleDecision construction");
       this->MergeMode = MergeMode;
       this->Op0Indices = Op0Indices;
       this->Op1Value = Op1Value;
@@ -849,11 +828,8 @@ private:
         // NOTE: This only checks the first two values in AltVL
         if (AltVL.size() != BundleSize)
             return false;
-        if (AltVL[0] != VL01.first)
-            return false;
-        if (BundleSize > 1 && AltVL[1] != VL01.second)
-            return false;
-        return true;
+
+        return std::equal(AltVL.begin(), AltVL.end(), this->VL.begin());
     }
   };
 
@@ -862,7 +838,6 @@ private:
 
   ShuffleBundleDecision getShuffleBundleDecision(ArrayRef<Value *> VL) {
     for (ShuffleBundleDecision decision : ShuffleCache)
-      //if (isSameBundle(VL, decision.VL01))
       if (decision.matchesBundle(VL))
         return decision;
 
@@ -2109,7 +2084,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
         LLVM_DEBUG(dbgs() << "Revc: buildTree_rec: After adding lane widen shuffle decision, ShuffleCache contains:\n");
         for (unsigned i = 0; i < ShuffleCache.size(); ++i) {
           ShuffleBundleDecision d = ShuffleCache[i];
-          LLVM_DEBUG(dbgs() << "Revec:   MM: " << d.MergeMode << ", VL0: " << d.VL01.first << " = " << *d.VL01.first << "\n");
+          LLVM_DEBUG(dbgs() << "Revec:   MM: " << d.MergeMode << ", VL0: " << d.VL[0] << " = " << *d.VL[0] << "\n");
         }
         buildTree_rec(Left, Depth + 1, UserTreeIdx);
         buildTree_rec(Right, Depth + 1, UserTreeIdx);
@@ -2612,13 +2587,13 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       LLVM_DEBUG(dbgs() << "Revec: getEntryCost: Prior to getShuffleBundle, ShuffleCache contents:\n");
       for (unsigned i = 0; i < ShuffleCache.size(); ++i) {
         ShuffleBundleDecision d = ShuffleCache[i];
-        LLVM_DEBUG(dbgs() << "Revec:   MM: " << d.MergeMode << ", VL0: " << d.VL01.first << " = " << *d.VL01.first << "\n");
+        LLVM_DEBUG(dbgs() << "Revec:   MM: " << d.MergeMode << ", VL0: " << d.VL[0] << " = " << *d.VL[0] << "\n");
       }
 
       const auto& decision = getShuffleBundleDecision(VL);
 
       LLVM_DEBUG(dbgs() << "getEntryCost: Found decision with merge mode " << decision.MergeMode << " and bundle: \n");
-#if 0
+#if 1
       for (Value *val : decision.VL)
         LLVM_DEBUG(dbgs() << "Revec:   " << val << " = " << *val << "\n");
 #else
@@ -3856,7 +3831,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       const ShuffleBundleDecision &decision = getShuffleBundleDecision(E->Scalars);
 
       LLVM_DEBUG(dbgs() << "Revec: vectorizeTree: Found decision with merge mode " << decision.MergeMode << " and bundle: \n");
-#if 0
+#if 1
       for (Value *val : decision.VL)
         LLVM_DEBUG(dbgs() << "Revec:   " << val << " = " << *val << "\n");
 #else
