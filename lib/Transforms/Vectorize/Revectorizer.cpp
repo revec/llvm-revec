@@ -17,6 +17,8 @@
 //
 //===-----------------------------------------------------------------------------===//
 
+#include <iostream>
+
 #include "llvm/Transforms/Vectorize/Revectorizer/Revectorizer.h"
 #include "llvm/Transforms/Vectorize/Revectorizer/IntrinsicConversion.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -773,6 +775,9 @@ private:
     /// The TreeEntry index containing the user of this entry.  We can actually
     /// have multiple users so the data structure is not truly a tree.
     SmallVector<int, 1> UserTreeIndices;
+
+    /// A cost used when rendering the revectorization graph
+    int CostCached = 99999;
   };
 
   using OperandIndices = std::bitset<MaxBundleSize>;
@@ -1420,16 +1425,17 @@ template <> struct DOTGraphTraits<BoUpSLP *> : public DefaultDOTGraphTraits {
     raw_string_ostream OS(Str);
     if (isSplat(Entry->Scalars)) {
       OS << "<splat> " << *Entry->Scalars[0];
-      return Str;
+    } else {
+      for (auto V : Entry->Scalars) {
+        OS << *V;
+        if (std::any_of(
+                R->ExternalUses.begin(), R->ExternalUses.end(),
+                [&](const BoUpSLP::ExternalUser &EU) { return EU.Scalar == V; }))
+          OS << " <extract>";
+        OS << "\n";
+      }
     }
-    for (auto V : Entry->Scalars) {
-      OS << *V;
-      if (std::any_of(
-              R->ExternalUses.begin(), R->ExternalUses.end(),
-              [&](const BoUpSLP::ExternalUser &EU) { return EU.Scalar == V; }))
-        OS << " <extract>";
-      OS << "\n";
-    }
+    OS << "Entry cost: " << Entry->CostCached << "\n";
     return Str;
   }
 
@@ -2097,6 +2103,10 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
       LLVM_DEBUG(dbgs() << "Revec: non-vectorizable ShuffleVector bundle.\n");
       for (Value *val : VL)
         LLVM_DEBUG(dbgs() << "   " << *val << "\n");
+
+      printf("Revec: non-veectorizable ShuffleVector bundle.\n");
+      for (Value *val : VL)
+        outs() << *val << "\n";
 #endif
       OperandIndices dummyIndices;
       ShuffleCache.emplace_back(VL, ShuffleBundleDecision::Gather, dummyIndices, nullptr);
@@ -2773,6 +2783,7 @@ int BoUpSLP::getTreeCost() {
       continue;
 
     int C = getEntryCost(&TE);
+    TE.CostCached = C;
     LLVM_DEBUG(dbgs() << "Revec: Adding cost " << C << " for bundle that starts with "
                  << *TE.Scalars[0] << ".\n");
     EntryCosts += C;
