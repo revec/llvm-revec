@@ -230,6 +230,10 @@ TargetTransformInfo::UnrollingPreferences llvm::gatherUnrollingPreferences(
   if (UnrollUnrollRemainder.getNumOccurrences() > 0)
     UP.UnrollRemainder = UnrollUnrollRemainder;
 
+
+  LLVM_DEBUG(dbgs() << "unroll runtime after cl:opt : " << UP.Runtime << "\n");
+
+
   // Apply user values provided by argument
   if (UserThreshold.hasValue()) {
     UP.Threshold = *UserThreshold;
@@ -239,12 +243,14 @@ TargetTransformInfo::UnrollingPreferences llvm::gatherUnrollingPreferences(
     UP.Count = *UserCount;
   if (UserAllowPartial.hasValue())
     UP.Partial = *UserAllowPartial;
-  if (UserRuntime.hasValue())
-    UP.Runtime = *UserRuntime;
+  //if (UserRuntime.hasValue())
+  //  UP.Runtime = *UserRuntime;
   if (UserUpperBound.hasValue())
     UP.UpperBound = *UserUpperBound;
   if (UserAllowPeeling.hasValue())
     UP.AllowPeeling = *UserAllowPeeling;
+
+  LLVM_DEBUG(dbgs() << "unroll runtime after user values : " << UP.Runtime << "\n");
 
   return UP;
 }
@@ -967,8 +973,8 @@ static LoopUnrollResult tryToUnrollLoop(
     Optional<bool> ProvidedAllowPartial, Optional<bool> ProvidedRuntime,
     Optional<bool> ProvidedUpperBound, Optional<bool> ProvidedAllowPeeling) {
   LLVM_DEBUG(dbgs() << "Loop Unroll: F["
-                    << L->getHeader()->getParent()->getName() << "] Loop %"
-                    << L->getHeader()->getName() << "\n");
+	     << L->getHeader()->getParent()->getName() << "] Loop %"
+	     << L->getHeader()->getName() << "\n");
   if (HasUnrollDisablePragma(L))
     return LoopUnrollResult::Unmodified;
   if (!L->isLoopSimplifyForm()) {
