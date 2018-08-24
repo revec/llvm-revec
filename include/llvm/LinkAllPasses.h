@@ -54,6 +54,7 @@
 #include "llvm/Transforms/Utils/SymbolRewriter.h"
 #include "llvm/Transforms/Utils/UnifyFunctionExitNodes.h"
 #include "llvm/Transforms/Vectorize.h"
+#include "llvm/Analysis/RevecUnrollAnalysis.h"
 #include <cstdlib>
 
 namespace {
@@ -207,6 +208,7 @@ namespace {
       (void) llvm::createSLPVectorizerPass();
       (void) llvm::createLoadStoreVectorizerPass();
       (void) llvm::createRevectorizerPass();
+      (void) llvm::createRevecAnalysisPass();
       (void) llvm::createPartiallyInlineLibCallsPass();
       (void) llvm::createScalarizerPass();
       (void) llvm::createSeparateConstOffsetFromGEPPass();

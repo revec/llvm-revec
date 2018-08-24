@@ -57,6 +57,7 @@
 #include "llvm/Transforms/Utils/LoopSimplify.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
 #include "llvm/Transforms/Utils/UnrollLoop.h"
+#include "llvm/Analysis/RevecUnrollAnalysis.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
@@ -243,8 +244,8 @@ TargetTransformInfo::UnrollingPreferences llvm::gatherUnrollingPreferences(
     UP.Count = *UserCount;
   if (UserAllowPartial.hasValue())
     UP.Partial = *UserAllowPartial;
-  //if (UserRuntime.hasValue())
-  //  UP.Runtime = *UserRuntime;
+  if (UserRuntime.hasValue())
+    UP.Runtime = *UserRuntime;
   if (UserUpperBound.hasValue())
     UP.UpperBound = *UserUpperBound;
   if (UserAllowPeeling.hasValue())
@@ -965,10 +966,12 @@ bool llvm::computeUnrollCount(
   return ExplicitUnroll;
 }
 
+
 static LoopUnrollResult tryToUnrollLoop(
     Loop *L, DominatorTree &DT, LoopInfo *LI, ScalarEvolution &SE,
     const TargetTransformInfo &TTI, AssumptionCache &AC,
-    OptimizationRemarkEmitter &ORE, bool PreserveLCSSA, int OptLevel,
+    OptimizationRemarkEmitter &ORE,
+    bool PreserveLCSSA, int OptLevel,
     Optional<unsigned> ProvidedCount, Optional<unsigned> ProvidedThreshold,
     Optional<bool> ProvidedAllowPartial, Optional<bool> ProvidedRuntime,
     Optional<bool> ProvidedUpperBound, Optional<bool> ProvidedAllowPeeling) {
@@ -1066,6 +1069,18 @@ static LoopUnrollResult tryToUnrollLoop(
   bool IsCountSetExplicitly = computeUnrollCount(
       L, TTI, DT, LI, SE, EphValues, &ORE, TripCount, MaxTripCount,
       TripMultiple, LoopSize, UP, UseUpperBound);
+
+
+  /*if (LC.find(L) != LC.end()){  //override zero unroll factors if an unroll factor is specified manually
+    if (UP.Count < LC[L]){
+      LLVM_DEBUG(dbgs() << "UNROLL: forced unroll from " << UP.Count << " to " << LC[L] << "\n";);
+      UP.Count = LC[L];
+    }
+    UP.AllowExpensiveTripCount = true;
+    }*/
+  LLVM_DEBUG(dbgs() << "UNROLL count : " << UP.Count << "\n");
+    
+
   if (!UP.Count)
     return LoopUnrollResult::Unmodified;
   // Unroll factor (Count) must be less or equal to TripCount.
@@ -1134,6 +1149,16 @@ public:
     // but ORE cannot be preserved (see comment before the pass definition).
     OptimizationRemarkEmitter ORE(&F);
     bool PreserveLCSSA = mustPreserveAnalysisID(LCSSAID);
+    auto &LC = getAnalysis<RevecAnalysisPass>().getUC();
+
+    if (LC.find(L) != LC.end()){
+        LLVM_DEBUG(dbgs() << "UNROLL: found " << LC[L] << "\n";);
+        ProvidedCount = LC[L];
+        ProvidedThreshold = 1000;
+        ProvidedAllowPartial = true;
+    	ProvidedRuntime = true;
+    }
+
 
     LoopUnrollResult Result = tryToUnrollLoop(
         L, DT, LI, SE, TTI, AC, ORE, PreserveLCSSA, OptLevel, ProvidedCount,
@@ -1151,6 +1176,7 @@ public:
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<AssumptionCacheTracker>();
     AU.addRequired<TargetTransformInfoWrapperPass>();
+    AU.addRequired<RevecAnalysisPass>();
     // FIXME: Loop passes are required to preserve domtree, and for now we just
     // recreate dom info if anything gets unrolled.
     getLoopAnalysisUsage(AU);
@@ -1165,6 +1191,7 @@ INITIALIZE_PASS_BEGIN(LoopUnroll, "loop-unroll", "Unroll loops", false, false)
 INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
 INITIALIZE_PASS_DEPENDENCY(LoopPass)
 INITIALIZE_PASS_DEPENDENCY(TargetTransformInfoWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(RevecAnalysisPass)
 INITIALIZE_PASS_END(LoopUnroll, "loop-unroll", "Unroll loops", false, false)
 
 Pass *llvm::createLoopUnrollPass(int OptLevel, int Threshold, int Count,
