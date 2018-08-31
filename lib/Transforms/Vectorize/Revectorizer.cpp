@@ -3205,7 +3205,9 @@ Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
     gathered = Gather_extract_insert(VL, Ty);
   } else {
     assert(isPowerOf2_32(size) && size > 1 && "Gathering value list that is not of a power of two length greater than 1");
-    gathered = Gather_rec(VL, Ty, 0, size);
+    gathered = concatenateVectors(Builder, VL);
+    assert(gathered->getType() == Ty && "Gathered value has a different type than expected");
+    //gathered = Gather_rec(VL, Ty, 0, size);
   }
 
   // TODO: Pad vector with undefs if the type does not match?
