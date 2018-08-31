@@ -1004,6 +1004,15 @@ void eraseInstruction(Instruction *I) {
   DeletedInstructions.emplace_back(I);
 }
 
+int getInstructionThroughput(const Instruction *I, int defaultCost) const {
+  int cost = TTI->getInstructionCost(I, TargetTransformInfo::TCK_RecipThroughput);
+  if (cost < 0) {
+    LLVM_DEBUG(dbgs() << "Revec: Unknown cost for " << *I << ", defaulting to cost = " << defaultCost << ".\n");
+    return defaultCost;
+  }
+  return cost;
+}
+
 /// Temporary store for deleted instructions. Instructions will be deleted
 /// eventually when the BoUpSLP is destructed.
 SmallVector<unique_value, 8> DeletedInstructions;
@@ -2630,13 +2639,11 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       if (NeedToShuffleReuses) {
         for (unsigned Idx : E->ReuseShuffleIndices) {
           Instruction *I = cast<Instruction>(VL[Idx]);
-          ReuseShuffleCost -= TTI->getInstructionCost(
-              I, TargetTransformInfo::TCK_RecipThroughput);
+          ReuseShuffleCost -= getInstructionThroughput(I, 1);
         }
         for (Value *V : VL) {
           Instruction *I = cast<Instruction>(V);
-          ReuseShuffleCost += TTI->getInstructionCost(
-              I, TargetTransformInfo::TCK_RecipThroughput);
+          ReuseShuffleCost += getInstructionThroughput(I, 1);
         }
       }
 
@@ -2652,8 +2659,7 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
           assert(sameOpcodeOrAlt(S.Opcode, getAltOpcode(S.Opcode),
                                  I->getOpcode()) &&
                  "Unexpected main/alternate opcode");
-          NarrowVecCost += TTI->getInstructionCost(
-              I, TargetTransformInfo::TCK_RecipThroughput);
+          NarrowVecCost += getInstructionThroughput(I, 1);
         }
 
         // VecCost is equal to sum of the cost of creating 2 vectors
@@ -2674,14 +2680,14 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       int NarrowVecCost = 0;
       for (Value *i : VL) {
         ShuffleVectorInst *I = cast<ShuffleVectorInst>(i);
-        LLVM_DEBUG(dbgs() << "Revec:   " << *I << "\n");
 
-        // Get the cost of this shuffle by inspecting operands
-        NarrowVecCost +=
-            TTI->getInstructionCost(I, TargetTransformInfo::TCK_RecipThroughput);
+        // Get the cost of this shuffle
+        NarrowVecCost += getInstructionThroughput(I, 1);
+
             // getShuffleCost(cast<VectorType>(I->getOperand(0)->getType()),
             //               cast<VectorType>(I->getOperand(1)->getType()),
-            //               cast<VectorType>(I->getMask()->getType()));
+            //               kkkcast<VectorType>(I->getMask()->getType()));
+            //
       }
 
       // TODO: improve getShuffleCost to better match TTI->getInstructionCost(Instruction)
@@ -2695,7 +2701,7 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
 
       const auto& decision = getShuffleBundleDecision(VL);
 
-      LLVM_DEBUG(dbgs() << "getEntryCost: Found decision with merge mode " << decision.MergeMode << " and bundle: \n");
+      LLVM_DEBUG(dbgs() << "Revec: getEntryCost: Found decision with merge mode " << decision.MergeMode << " and bundle: \n");
 #if 1
       for (Value *val : decision.VL)
         LLVM_DEBUG(dbgs() << "Revec:   " << val << " = " << *val << "\n");
@@ -2731,6 +2737,10 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
         default:
           llvm_unreachable("Unrecognized decision type");
       }
+
+      LLVM_DEBUG(dbgs() << "Revec: Calculated cost " << ReuseShuffleCost << " + " << FusedVecCost << " - " << NarrowVecCost << " for shuffle merge mode " << decision.MergeMode << "\n");
+      for (Value *val : VL)
+          LLVM_DEBUG(dbgs() << "Revec:   " << *val << "\n");
 
       return ReuseShuffleCost + FusedVecCost - NarrowVecCost;
     }
