@@ -4885,8 +4885,14 @@ bool RevectorizerPass::vectorizeStoreChain(ArrayRef<Value *> Chain, BoUpSLP &R,
   const unsigned Sz = R.getVectorElementSize(Chain[0]);
   const unsigned VF = VecRegSize / Sz;
 
-  if (!isPowerOf2_32(Sz) || VF < 2)
+  LLVM_DEBUG(dbgs() << "Revec: Chain[0] size: " << Sz << ", VF: " << VF << "\n");
+
+  if (!isPowerOf2_32(Sz) || VF < 2) {
+    LLVM_DEBUG(dbgs() << "Revec: Unable to vectorize store chain, as store 0 stores non-power-of-two size " << Sz
+                      << ", or VF " << VF << " < 2\n");
+    LLVM_DEBUG(dbgs() << "Revec:  Chain[0] = " << *Chain[0] << "\n");
     return false;
+  }
 
   // Keep track of values that were deleted by vectorizing in the loop below.
   const SmallVector<WeakTrackingVH, 8> TrackValues(Chain.begin(), Chain.end());
@@ -4896,8 +4902,10 @@ bool RevectorizerPass::vectorizeStoreChain(ArrayRef<Value *> Chain, BoUpSLP &R,
   for (unsigned i = 0, e = ChainLen; i + VF <= e; ++i) {
 
     // Check that a previous iteration of this loop did not delete the Value.
-    if (hasValueBeenRAUWed(Chain, TrackValues, i, VF))
+    if (hasValueBeenRAUWed(Chain, TrackValues, i, VF)) {
+      LLVM_DEBUG(dbgs() << "Revec: Store has been RAUWed, skipping offset " << i << "\n");
       continue;
+    }
 
     LLVM_DEBUG(dbgs() << "Revec: Analyzing " << VF << " stores at offset " << i
           << "\n");
@@ -4945,6 +4953,11 @@ bool RevectorizerPass::vectorizeStores(ArrayRef<StoreInst *> Stores,
 
   // Do a quadratic search on all of the given stores in reverse order and find
   // all of the pairs of stores that follow each other.
+  LLVM_DEBUG(dbgs() << "Revec: Searching for adjacencies in store chain of length " << Stores.size()
+                    << "\n");
+  for (StoreInst *Store : Stores)
+      LLVM_DEBUG(dbgs() << "Revec:   " << *Store << "\n");
+
   SmallVector<unsigned, 16> IndexQueue;
   unsigned E = Stores.size();
   IndexQueue.resize(E - 1);
@@ -4977,6 +4990,8 @@ bool RevectorizerPass::vectorizeStores(ArrayRef<StoreInst *> Stores,
     }
   }
 
+  LLVM_DEBUG(dbgs() << "Revec: Counted " << Heads.size() << " heads\n");
+
   // For stores that start but don't end a link in the chain:
   for (auto *SI : llvm::reverse(Heads)) {
     if (Tails.count(SI))
@@ -4992,6 +5007,8 @@ bool RevectorizerPass::vectorizeStores(ArrayRef<StoreInst *> Stores,
       // Move to the next value in the chain.
       I = ConsecutiveChain[I];
     }
+
+    LLVM_DEBUG(dbgs() << "Revec: Found consecutive store chain of length " << Operands.size() << "\n");
 
     // FIXME: Is division-by-2 the correct step? Should we assert that the
     // register size is a power-of-2?
@@ -5041,14 +5058,14 @@ bool RevectorizerPass::vectorizeStoreChains(BoUpSLP &R) {
       continue;
 
     LLVM_DEBUG(dbgs() << "Revec: Analyzing a store chain of length "
-          << it->second.size() << ".\n");
+          << it->second.size() << " in vectorizeStoreChains.\n");
 
-    // Process the stores in chunks of 16.
-    // TODO: The limit of 16 inhibits greater vectorization factors.
+    // Process the stores in chunks of 32.
+    // TODO: The limit of 32 inhibits greater vectorization factors.
     //       For example, AVX2 supports v32i8. Increasing this limit, however,
     //       may cause a significant compile-time increase.
-    for (unsigned CI = 0, CE = it->second.size(); CI < CE; CI+=16) {
-      unsigned Len = std::min<unsigned>(CE - CI, 16);
+    for (unsigned CI = 0, CE = it->second.size(); CI < CE; CI+=32) {
+      unsigned Len = std::min<unsigned>(CE - CI, 32);
       Changed |= vectorizeStores(makeArrayRef(&it->second[CI], Len), R);
     }
   }
