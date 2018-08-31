@@ -2098,17 +2098,17 @@ switch (ShuffleOrOp) {
 
     if (isSplat(Left)) {
       if (isSplat(Right)) {
-        if (dyn_cast<UndefValue>(Right[0] != nullptr) {
-          unsigned last_mask_value = 0;
+        if (dyn_cast<UndefValue>(Right[0]) != nullptr) {
+          unsigned expected_mask_value = 0;
           bool isSequentialMask = true;
           for (Constant * mask : Masks) {
-            for (unsigned i = 0; i < mask.getNumOperands(); ++i) {
-              if (mask.getOperand(i) != last_mask_value + 1) {
+            for (unsigned i = 0; i < mask->getNumOperands(); ++i) {
+              if (!cast<ConstantInt>(mask->getOperand(i))->equalsInt(expected_mask_value)) {
                 isSequentialMask = false;
                 break;
               }
 
-              ++last_mask_value;
+              ++expected_mask_value;
             }
           }
 
