@@ -261,6 +261,13 @@ static bool isSplat(ArrayRef<Value *> VL) {
   return true;
 }
 
+static bool isSplat(ArrayRef<Constant *> VL) {
+  for (unsigned i = 1, e = VL.size(); i < e; ++i)
+    if (VL[i] != VL[0])
+      return false;
+  return true;
+}
+
 ///\returns Opcode that can be clubbed with \p Op to create an alternate
 /// sequence which can later be merged as a ShuffleVector instruction.
 static unsigned getAltOpcode(unsigned Op) {
@@ -836,6 +843,8 @@ private:
       //   sv cat{A, B}, cat{merge<C1, C2>, merge<C3, C4>}, cat{M1, M2, M3 offset by |A|, M4 offset by |A|}
       FirstThirdOp0_DoubleMergeOp1 = 4,
 
+      // If we have a bundle of shuffles that extract consecutive subvectors from the same source vector,
+      // delete the shufflevector bundle and use the source operand as the vectorized value.
       FirstOp0 = 5
     };
 
@@ -2112,7 +2121,8 @@ switch (ShuffleOrOp) {
           bool isSequentialMask = true;
           for (Constant * mask : Masks) {
             for (unsigned i = 0; i < mask->getNumOperands(); ++i) {
-              if (!cast<ConstantInt>(mask->getOperand(i))->equalsInt(expected_mask_value)) {
+              ConstantInt *CI = dyn_cast<ConstantInt>(mask->getOperand(i));
+              if (CI == nullptr || !CI->equalsInt(expected_mask_value)) {
                 isSequentialMask = false;
                 break;
               }
@@ -2181,7 +2191,7 @@ switch (ShuffleOrOp) {
       }
 #endif
 
-      if (allConstant(Right) || allConstant(Left)) {
+      if (allConstant(Right) || allConstant(Left) || isSplat(Masks)) {
         // Widen operands vertically, and merge shuffle masks
         OperandIndices dummyIndices;
         ShuffleCache.emplace_back(VL, ShuffleBundleDecision::IndexOp0_IndexOp1_WidenMask, dummyIndices, nullptr);
