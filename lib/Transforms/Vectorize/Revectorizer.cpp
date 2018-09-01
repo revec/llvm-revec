@@ -1286,14 +1286,14 @@ struct BlockScheduling {
   void initialFillReadyList(ReadyListType &ReadyList) {
     for (auto *I = ScheduleStart; I != ScheduleEnd; I = I->getNextNode()) {
       doForAllOpcodes(I, [&](ScheduleData *SD) {
+#if 0
         LLVM_DEBUG(dbgs() << "Revec:    ScheduleData: " << *SD << " Instr: " << *I
                       << "\n\tSD: " << SD
                       << "\n\tSD FirstInBundle: " << SD->FirstInBundle
                       << "\n\tSD UnscheduledDeps: " << SD->UnscheduledDeps
                       << "\n\tSD UnscheduledDepsInBundle: " << SD->UnscheduledDepsInBundle << "\n");
-        // TODO: Need to put back in pickedSD->isReady(), but no ScheduleData bundle is ready on a test...
+#endif
         if (SD->isSchedulingEntity() && SD->isReady()) {
-        // if (SD->isSchedulingEntity()) {
           ReadyList.insert(SD);
           LLVM_DEBUG(dbgs() << "Revec:    initially in ready list: " << *I << "\n");
         }
@@ -2122,6 +2122,7 @@ switch (ShuffleOrOp) {
           }
 
           if (isSequentialMask) {
+            // TODO: Remove dummyIndices
             OperandIndices dummyIndices;
             ShuffleCache.emplace_back(VL, ShuffleBundleDecision::FirstOp0, dummyIndices, nullptr);
             newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
@@ -3311,9 +3312,12 @@ Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
     gathered = Gather_extract_insert(VL, Ty);
   } else {
     assert(isPowerOf2_32(size) && size > 1 && "Gathering value list that is not of a power of two length greater than 1");
+#if 1
     gathered = concatenateVectors(Builder, VL);
+#else
+    gathered = Gather_rec(VL, Ty, 0, size);
+#endif
     assert(gathered->getType() == Ty && "Gathered value has a different type than expected");
-    //gathered = Gather_rec(VL, Ty, 0, size);
   }
 
   // TODO: Pad vector with undefs if the type does not match?
@@ -4985,6 +4989,10 @@ bool RevectorizerPass::vectorizeStoreChain(ArrayRef<Value *> Chain, BoUpSLP &R,
   const unsigned ChainLen = Chain.size();
   LLVM_DEBUG(dbgs() << "Revec: Analyzing a store chain of length " << ChainLen
         << "\n");
+  for (auto *StoreValue : Chain) {
+    LLVM_DEBUG(dbgs() << "Revec:   " << *StoreValue << "\n");
+  }
+
   // TODO: getVectorElementSize checks that the value is not of a vector type.
   //       Switch to getVectorSize (equivalent for now)
   const unsigned Sz = R.getVectorElementSize(Chain[0]);
@@ -5003,8 +5011,18 @@ bool RevectorizerPass::vectorizeStoreChain(ArrayRef<Value *> Chain, BoUpSLP &R,
   const SmallVector<WeakTrackingVH, 8> TrackValues(Chain.begin(), Chain.end());
 
   bool Changed = false;
+#if 0
   // Look for profitable vectorizable trees at all offsets, starting at zero.
   for (unsigned i = 0, e = ChainLen; i + VF <= e; ++i) {
+#else
+  // Look for profitable vectorizable trees at all offsets, starting at at the end of the chain.
+  if (ChainLen < VF) {
+    LLVM_DEBUG(dbgs() << "Revec: Unable to vectorize store chain, as chain length is less than VF.\n");
+    return false;
+  }
+
+  for (int i = ChainLen - VF; i >= 0; --i) {
+#endif
 
     // Check that a previous iteration of this loop did not delete the Value.
     if (hasValueBeenRAUWed(Chain, TrackValues, i, VF)) {
@@ -5030,14 +5048,14 @@ bool RevectorizerPass::vectorizeStoreChain(ArrayRef<Value *> Chain, BoUpSLP &R,
 
       R.getORE()->emit(OptimizationRemark(SV_NAME, "StoresVectorized",
                                           cast<StoreInst>(Chain[i]))
-                       << "Stores SLP vectorized with cost " << NV("Cost", Cost)
+                       << "Stores revectorized with cost " << NV("Cost", Cost)
                        << " and with tree size "
                        << NV("TreeSize", R.getTreeSize()));
 
       R.vectorizeTree();
 
       // Move to the next bundle.
-      i += VF - 1;
+      i -= VF - 1;
       Changed = true;
     }
   }
@@ -5095,10 +5113,13 @@ bool RevectorizerPass::vectorizeStores(ArrayRef<StoreInst *> Stores,
     }
   }
 
-  LLVM_DEBUG(dbgs() << "Revec: Counted " << Heads.size() << " heads\n");
+  LLVM_DEBUG(dbgs() << "Revec: Counted " << Heads.size() << " heads:\n");
+  for (auto *SI : Heads) {
+    LLVM_DEBUG(dbgs() << "Revec:   " << *SI << "\n");
+  }
 
   // For stores that start but don't end a link in the chain:
-  for (auto *SI : llvm::reverse(Heads)) {
+  for (auto *SI : Heads) {
     if (Tails.count(SI))
       continue;
 
@@ -5138,7 +5159,9 @@ void RevectorizerPass::collectSeedInstructions(BasicBlock *BB, BoUpSLP &R) {
   // Visit the store and getelementptr instructions in BB and organize them in
   // Stores and GEPs according to the underlying objects of their pointer
   // operands.
+  LLVM_DEBUG(dbgs() << "Revec: Collecting seed instructions from basic block:\n");
   for (Instruction &I : *BB) {
+    LLVM_DEBUG(dbgs() << "Revec:   " << I << "\n");
     // Ignore store instructions that are volatile or have a pointer operand
     // that doesn't point to a vector type.
     if (auto *SI = dyn_cast<StoreInst>(&I)) {
@@ -5157,6 +5180,25 @@ void RevectorizerPass::collectSeedInstructions(BasicBlock *BB, BoUpSLP &R) {
 bool RevectorizerPass::vectorizeStoreChains(BoUpSLP &R) {
   bool Changed = false;
   // Attempt to sort and vectorize each of the store-groups.
+#if 1
+  //for (auto& StorePair : llvm::reverse(Stores)) {
+  for (auto& StorePair : Stores) {
+    if (StorePair.second.size() < 2)
+      continue;
+
+    LLVM_DEBUG(dbgs() << "Revec: Analyzing a store chain of length "
+        << StorePair.second.size() << " in vectorizeStoreChains.\n");
+
+    // Process the stores to this underlying object in chunks of 32
+    int CI = std::max<int>((int) StorePair.second.size() - 32, 0);
+    int CE = StorePair.second.size();
+    while (CI >= 0) {
+      unsigned Len = (unsigned) std::min<int>(CE - CI, 32);
+      Changed |= vectorizeStores(makeArrayRef(&StorePair.second[CI], Len), R);
+      CI -= 32;
+    }
+  }
+#else
   for (StoreListMap::iterator it = Stores.begin(), e = Stores.end(); it != e;
        ++it) {
     if (it->second.size() < 2)
@@ -5167,13 +5209,14 @@ bool RevectorizerPass::vectorizeStoreChains(BoUpSLP &R) {
 
     // Process the stores in chunks of 32.
     // TODO: The limit of 32 inhibits greater vectorization factors.
-    //       For example, AVX2 supports v32i8. Increasing this limit, however,
+    //       For example, AVX512 supports v64i8. Increasing this limit, however,
     //       may cause a significant compile-time increase.
     for (unsigned CI = 0, CE = it->second.size(); CI < CE; CI+=32) {
       unsigned Len = std::min<unsigned>(CE - CI, 32);
       Changed |= vectorizeStores(makeArrayRef(&it->second[CI], Len), R);
     }
   }
+#endif
   return Changed;
 }
 
