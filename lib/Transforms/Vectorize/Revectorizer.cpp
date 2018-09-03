@@ -147,6 +147,10 @@ static cl::opt<unsigned> MinTreeSize(
     "revec-min-tree-size", cl::init(3), cl::Hidden,
     cl::desc("Only vectorize small trees if they are fully vectorizable"));
 
+static cl::opt<unsigned> MaxStoreChunkSize(
+    "revec-max-store-chunk-size", cl::init(256), cl::Hidden,
+    cl::desc("Limit the number of stores within which Revec conducts a quadratic adjacency search"));
+
 static cl::opt<bool>
     WriteRevecTree("write-revec-tree", cl::Hidden,
                 cl::desc("Write out Revectorization SLP trees to files in /tmp"));
@@ -5096,18 +5100,23 @@ bool RevectorizerPass::runImpl(Function &F, ScalarEvolution *SE_,
   DL = &F.getParent()->getDataLayout();
 
   Stores.clear();
-  bool Changed = false;
 
   // If the target claims to have no vector registers don't attempt
   // vectorization.
-  if (!TTI->getNumberOfRegisters(true))
+  if (!TTI->getNumberOfRegisters(true)) {
+    LLVM_DEBUG(dbgs() << "Revec: Not revectorizing " << F.getName() << " as target has no vector registers\n");
     return false;
+  }
 
   // Don't vectorize when the attribute NoImplicitFloat is used.
-  if (F.hasFnAttribute(Attribute::NoImplicitFloat))
+  if (F.hasFnAttribute(Attribute::NoImplicitFloat)) {
+    LLVM_DEBUG(dbgs() << "Revec: Not revectorizing " << F.getName() << " as it has attribute NoImplicitFloat\n");
     return false;
+  }
 
   LLVM_DEBUG(dbgs() << "Revec: Analyzing blocks in " << F.getName() << ".\n");
+  LLVM_DEBUG(dbgs() << "Revec: Function IR:\n");
+  LLVM_DEBUG(dbgs() << F << "\n");
 
   // Use the bottom up slp vectorizer to construct chains that start with
   // store instructions.
@@ -5115,6 +5124,8 @@ bool RevectorizerPass::runImpl(Function &F, ScalarEvolution *SE_,
 
   // A general note: the vectorizer must use BoUpSLP::eraseInstruction() to
   // delete instructions.
+
+  bool Changed = false;
 
   // Scan the blocks in the function in post order.
   for (auto BB : post_order(&F.getEntryBlock())) {
@@ -5133,6 +5144,7 @@ bool RevectorizerPass::runImpl(Function &F, ScalarEvolution *SE_,
     LLVM_DEBUG(dbgs() << "Revec: vectorized \"" << F.getName() << "\"\n");
     LLVM_DEBUG(verifyFunction(F));
   }
+
   return Changed;
 }
 
@@ -5299,7 +5311,7 @@ bool RevectorizerPass::vectorizeStores(ArrayRef<StoreInst *> Stores,
       I = ConsecutiveChain[I];
     }
 
-    LLVM_DEBUG(dbgs() << "Revec: Found consecutive store chain of length " << Operands.size() << "\n");
+    LLVM_DEBUG(dbgs() << "Revec: Grabbing packs from store chain of length " << Operands.size() << "\n");
 
     // FIXME: Is division-by-2 the correct step? Should we assert that the
     // register size is a power-of-2?
@@ -5354,13 +5366,13 @@ bool RevectorizerPass::vectorizeStoreChains(BoUpSLP &R) {
     LLVM_DEBUG(dbgs() << "Revec: Analyzing a store chain of length "
         << StorePair.second.size() << " in vectorizeStoreChains.\n");
 
-    // Process the stores to this underlying object in chunks of 32
-    int CI = std::max<int>((int) StorePair.second.size() - 32, 0);
+    // Process the stores to this underlying object in chunks of 256 at most
+    int CI = std::max<int>((int) StorePair.second.size() - MaxStoreChunkSize, 0);
     int CE = StorePair.second.size();
     while (CI >= 0) {
-      unsigned Len = (unsigned) std::min<int>(CE - CI, 32);
+      unsigned Len = (unsigned) std::min<int>(CE - CI, MaxStoreChunkSize);
       Changed |= vectorizeStores(makeArrayRef(&StorePair.second[CI], Len), R);
-      CI -= 32;
+      CI -= MaxStoreChunkSize;
     }
   }
 #else
