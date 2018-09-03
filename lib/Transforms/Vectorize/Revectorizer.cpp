@@ -2293,8 +2293,9 @@ switch (ShuffleOrOp) {
         ShuffleCache.emplace_back(VL, ShuffleBundleDecision::IndexOp0_IndexOp1_WidenMask, dummyIndices, nullptr);
         newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
         LLVM_DEBUG(dbgs() << "Revec: added a ShuffleVector op for mode IndexOp0_IndexOp1_WidenMask (lane widening).\n");
-        for (Value *val : VL)
+        for (Value *val : VL) {
           LLVM_DEBUG(dbgs() << "Revec:   " << val << " = " << *val << "\n");
+        }
         assert(ShuffleCache.back().matchesBundle(VL) && "Could not find bundle that was just inserted");
         assert((getShuffleBundleDecision(VL).MergeMode == ShuffleBundleDecision::IndexOp0_IndexOp1_WidenMask) && "Failed to properly find just inserted shuffle bundle");
         LLVM_DEBUG(dbgs() << "Revc: buildTree_rec: After adding lane widen shuffle decision, ShuffleCache contains:\n");
@@ -2310,12 +2311,14 @@ switch (ShuffleOrOp) {
       // Default to a gather if we haven't encountered a special case.
       // TODO: Search recursively for optimal bundle indexes, with backtracking
       LLVM_DEBUG(dbgs() << "Revec: non-vectorizable ShuffleVector bundle.\n");
-      for (Value *val : VL)
+      for (Value *val : VL) {
         LLVM_DEBUG(dbgs() << "   " << *val << "\n");
+      }
 
       printf("Revec: non-veectorizable ShuffleVector bundle.\n");
-      for (Value *val : VL)
+      for (Value *val : VL) {
         outs() << *val << "\n";
+      }
 
       OperandIndices dummyIndices;
       ShuffleCache.emplace_back(VL, ShuffleBundleDecision::Gather, dummyIndices, nullptr);
@@ -2772,8 +2775,9 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
           TTI->getIntrinsicInstrCost(alt, wideReturnTy, WideArgTys, FMF);
 
       LLVM_DEBUG(dbgs() << "Revec: Calculated call cost " << ReuseShuffleCost << " + " << FusedVecCallCost << " - " << NarrowVecCallCost << " for calls:\n");
-      for (Value *val : VL)
+      for (Value *val : VL) {
           LLVM_DEBUG(dbgs() << "Revec:   " << *val << "\n");
+      }
 
       return ReuseShuffleCost + FusedVecCallCost - NarrowVecCallCost;
     }
@@ -2815,8 +2819,9 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
 
       LLVM_DEBUG(dbgs() << "Revec: Getting cost of shuffle vector bundle:\n");
 #ifndef DEBUG
-      for (Value *val : VL)
-          LLVM_DEBUG(dbgs() << "Revec:   " << *val << "\n");
+      for (Value *val : VL) {
+        LLVM_DEBUG(dbgs() << "Revec:   " << *val << "\n");
+      }
 #endif
       // assert(getBundleDecision(VL).hasValue() && "Attempting to get cost of non-vectorized shuffle bundle");
 
@@ -2846,8 +2851,9 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
 
       LLVM_DEBUG(dbgs() << "Revec: getEntryCost: Found decision with merge mode " << decision.MergeMode << " and bundle: \n");
 #if 1
-      for (Value *val : decision.VL)
+      for (Value *val : decision.VL) {
         LLVM_DEBUG(dbgs() << "Revec:   " << val << " = " << *val << "\n");
+      }
 #else
       LLVM_DEBUG(dbgs() << "Revec:     " << decision.VL01.first << " = " << *decision.VL01.first << "\n");
       if (decision.BundleSize > 1)
@@ -2882,8 +2888,9 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       }
 
       LLVM_DEBUG(dbgs() << "Revec: Calculated cost " << ReuseShuffleCost << " + " << FusedVecCost << " - " << NarrowVecCost << " for shuffle merge mode " << decision.MergeMode << "\n");
-      for (Value *val : VL)
+      for (Value *val : VL) {
           LLVM_DEBUG(dbgs() << "Revec:   " << *val << "\n");
+      }
 
       return ReuseShuffleCost + FusedVecCost - NarrowVecCost;
     }
@@ -3424,8 +3431,9 @@ Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
 
 #ifndef NDEBUG
   LLVM_DEBUG(dbgs() << "Revec: Gathering value list of size " << size << ":\n");
-  for (Value *val : VL)
+  for (Value *val : VL) {
     LLVM_DEBUG(dbgs() << "Revec:    " << *val << "\n");
+  }
 #endif
 
   Value *gathered;
@@ -4096,8 +4104,9 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       const ShuffleBundleDecision &decision = getShuffleBundleDecision(E->Scalars);
 
       LLVM_DEBUG(dbgs() << "Revec: vectorizeTree: Found decision with merge mode " << decision.MergeMode << " and bundle: \n");
-      for (Value *val : decision.VL)
+      for (Value *val : decision.VL) {
         LLVM_DEBUG(dbgs() << "Revec:   " << val << " = " << *val << "\n");
+      }
 
       switch (decision.MergeMode) {
         case ShuffleBundleDecision::FirstOp0: {
@@ -5255,8 +5264,9 @@ bool RevectorizerPass::vectorizeStores(ArrayRef<StoreInst *> Stores,
   // all of the pairs of stores that follow each other.
   LLVM_DEBUG(dbgs() << "Revec: Searching for adjacencies in store chain of length " << Stores.size()
                     << "\n");
-  for (StoreInst *Store : Stores)
+  for (StoreInst *Store : Stores) {
       LLVM_DEBUG(dbgs() << "Revec:   " << *Store << "\n");
+  }
 
   SmallVector<unsigned, 16> IndexQueue;
   unsigned E = Stores.size();
