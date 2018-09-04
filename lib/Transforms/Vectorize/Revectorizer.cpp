@@ -494,6 +494,25 @@ static bool isSimple(Instruction *I) {
   return true;
 }
 
+/// Adapted from llvm::createUnpackShuffleMask (X86ISelLowering.h)
+static bool isUnpackShuffle(VectorType *OpTy, Constant *Mask, bool Lo,
+                              bool Unary) {
+	Type *Ty = Mask->getType();
+	int NumElts = Ty->getVectorNumElements();
+  int NumEltsInLane = 128 / OpTy->getScalarSizeInBits();
+
+  for (int i = 0; i < NumElts; ++i) {
+    unsigned LaneStart = (i / NumEltsInLane) * NumEltsInLane;
+    int Pos = (i % NumEltsInLane) / 2 + LaneStart;
+    Pos += (Unary ? 0 : NumElts * (i % 2));
+    Pos += (Lo ? 0 : NumEltsInLane / 2);
+    Constant *El = Mask->getAggregateElement(i);
+    if (Mask->containsUndefElement() || El == nullptr || (int) El->getUniqueInteger().getLimitedValue() != Pos)
+      return false;
+  }
+
+  return true;
+}
 
 #if 0
 static bool canMergeConstants(ArrayRef<Value *> VL) {
@@ -921,6 +940,7 @@ protected:
       case ShuffleBundleDecision::IndexOp0_IndexOp1_WidenMask: {
         ValueList LeftBundle, RightBundle;
         for (unsigned i = 0, Max = VL.size(); i < Max; ++i) {
+
           ShuffleVectorInst *Inst = cast<ShuffleVectorInst>(VL[i]);
           LeftBundle.push_back(
               Inst->getOperand(Op0Indices[i] ? 1 : 0));
@@ -928,48 +948,57 @@ protected:
               Inst->getOperand(Op0Indices[i] ? 0 : 1));
         }
 
+
         // Merge shuffle masks. First, determine the offset each original
         // operand will have in the final shufflevector.
-        ValueMap<Value *, int> updatedOffsets;
+        SmallVector<int, 4> Op0Offsets, Op1Offsets;
         int offset = 0;
-        for (Value *val : LeftBundle) {
-          updatedOffsets[val] = offset;
-          offset += val->getType()->getVectorNumElements();
+        for (unsigned i = 0, Max = VL.size(); i < Max; ++i) {
+          if (Op0Indices[i])
+            Op1Offsets.push_back(offset);
+          else
+            Op0Offsets.push_back(offset);
+          offset += VL[i]->getType()->getVectorNumElements();
         }
-        for (Value *val : RightBundle) {
-          updatedOffsets[val] = offset;
-          offset += val->getType()->getVectorNumElements();
+        for (unsigned i = 0, Max = VL.size(); i < Max; ++i) {
+          if (Op0Indices[i])
+            Op0Offsets.push_back(offset);
+          else
+            Op1Offsets.push_back(offset);
+          offset += VL[i]->getType()->getVectorNumElements();
         }
 
         // Now, find the original offset of the operands of the bundle and
         // update the mask
         Type *int32Ty = nullptr;
         SmallVector<Constant *, 16> MaskVector;
-        for (Value *val : VL) {
-          ShuffleVectorInst *inst = cast<ShuffleVectorInst>(val);
+        for (unsigned i = 0, Max = VL.size(); i < Max; ++i) {
+          ShuffleVectorInst *inst = cast<ShuffleVectorInst>(VL[i]);
+
+          int maskShift0 = Op0Offsets[i];
 
           Value *narrowOp0 = inst->getOperand(0);
-          int maskShift0 = updatedOffsets[narrowOp0];
-
-          Value *narrowOp1 = inst->getOperand(1);
           int originalOffset1 = narrowOp0->getType()->getVectorNumElements();
-          int maskShift1 = updatedOffsets[narrowOp1] - originalOffset1;
+          int maskShift1 = Op1Offsets[i] - originalOffset1;
 
           if (int32Ty == nullptr)
             int32Ty = cast<Constant>(inst->getMask())->getAggregateElement(0U)->getType();
 
           for (int maskVal : inst->getShuffleMask()) {
+            int originalMaskVal = maskVal;
             if (maskVal < originalOffset1)
-              maskVal += maskShift0; // This mask value indexed operand 0
+              // This mask value indexed operand 0
+              maskVal += maskShift0;
             else
-              maskVal += maskShift1; // This mask value indexed operand 1
+              // This mask value indexed operand 1
+              maskVal += maskShift1;
 
-            // MaskVector.push_back(Builder.getInt32(maskVal));
             MaskVector.push_back(ConstantInt::get(int32Ty, maskVal));
           }
         }
 
         Mask = ConstantVector::get(MaskVector);
+        LLVM_DEBUG(dbgs() << "Revec: Created mask for shuffle merge mode IndexOp0_IndexOp1_MergeMask: " << *Mask << "\n");
         break;
       }
     }
@@ -2405,19 +2434,6 @@ bool BoUpSLP::areAllUsersVectorized(Instruction *I) const {
          });
 }
 
-
-#if 0
-int BoUpSLP::getShuffleCost(VectorType *Op0Ty, VectorType *Op1Ty, VectorType *MaskTy) {
-  assert(Op0Ty == Op1Ty && "Source operands of shufflevector must be the same");
-
-  VectorType *ShufTy = VectorType::get(Op0Ty->getElementType(), MaskTy->getNumElements());
-  if (MaskTy->getNumElements() == Op0Ty->getNumElements())
-    return TTI->getShuffleCost(TargetTransformInfo::SK_Select, ShufTy);
-
-  // TODO: If we can determine that Op1Ty is undef, add a special case for SK_PermuteSingleSrc
-  return TTI->getShuffleCost(TargetTransformInfo::SK_PermuteTwoSrc, ShufTy);
-}
-#else
 int BoUpSLP::getShuffleCost(VectorType *Op0Ty, VectorType *Op1Ty, Constant *Mask) {
   assert(Op0Ty == Op1Ty && "Source operands of shufflevector must be the same");
 
@@ -2426,53 +2442,60 @@ int BoUpSLP::getShuffleCost(VectorType *Op0Ty, VectorType *Op1Ty, Constant *Mask
   unsigned NumSourceElts = Op0Ty->getVectorNumElements();
   unsigned NumMaskElts = Ty->getVectorNumElements();
 
+  LLVM_DEBUG(dbgs() << "Revec: Getting cost of shuffle with source types " << *Op0Ty << " , " << *Op1Ty << ", mask " << *Mask << "\n");
+
 	// Cost is unknown is the shuffle vector changes length
 	// TODO: Identify and add costs for insert/extract subvector, etc.
-  if (NumSourceElts != NumMaskElts)
+  if (NumSourceElts != NumMaskElts) {
+    LLVM_DEBUG(dbgs() << "Revec:   Changes length\n");
     return NumMaskElts > 32 ? 2 : 1;
- 
-  if (ShuffleVectorInst::isIdentityMask(Mask))
-    return 0;
- 
-  if (ShuffleVectorInst::isReverseMask(Mask))
-    return TTI->getShuffleCost(TargetTransformInfo::SK_Reverse, Ty, 0, nullptr);
- 
-  if (ShuffleVectorInst::isSelectMask(Mask))
-    return TTI->getShuffleCost(TargetTransformInfo::SK_Select, Ty, 0, nullptr);
- 
-  if (ShuffleVectorInst::isTransposeMask(Mask))
-    return TTI->getShuffleCost(TargetTransformInfo::SK_Transpose, Ty, 0, nullptr);
- 
-  if (ShuffleVectorInst::isZeroEltSplatMask(Mask))
-    return TTI->getShuffleCost(TargetTransformInfo::SK_Broadcast, Ty, 0, nullptr);
- 
-  if (ShuffleVectorInst::isSingleSourceMask(Mask))
-    return TTI->getShuffleCost(TargetTransformInfo::SK_PermuteSingleSrc, Ty, 0, nullptr);
- 
-  return TTI->getShuffleCost(TargetTransformInfo::SK_PermuteTwoSrc, Ty, 0, nullptr);
-}
-#endif
-
-#if 0
-int BoUpSLP::getShuffleCost(ShuffleVectorInst *I) {
-  Value *Op0 = I->getOperand(0);
-  VectorType *Op0Ty = cast<VectorType>(Op0->getType());
-  VectorType *MaskTy = cast<VectorType>(I->getMask()->getType());
-
-  if (MaskTy->getNumElements() == Op0Ty->getNumElements()) {
-    Value *Op1 = I->getOperand(1);
-    if (dyn_cast<UndefValue>(Op1))
-      return TTI->getShuffleCost(TargetTransformInfo::SK_PermuteSingleSrc, I->getType());
-    else
-      return TTI->getShuffleCost(TargetTransformInfo::SK_Select, I->getType());
   }
 
-  // The output is a different size than the operands
-  return TTI->getShuffleCost(TargetTransformInfo::SK_PermuteTwoSrc, I->getType());
+  if (ShuffleVectorInst::isIdentityMask(Mask)) {
+    LLVM_DEBUG(dbgs() << "Revec:   Identity mask\n");
+    return 0;
+  }
 
-  // return TTI->getArithmeticInstrCost(I->getOpcode(), ElementTy, Op1VK, Op2VK);
+  if (ShuffleVectorInst::isReverseMask(Mask)) {
+    LLVM_DEBUG(dbgs() << "Revec:   Reverse mask\n");
+    return TTI->getShuffleCost(TargetTransformInfo::SK_Reverse, Ty, 0, nullptr);
+  }
+
+  if (ShuffleVectorInst::isSelectMask(Mask)) {
+    LLVM_DEBUG(dbgs() << "Revec:   Select mask\n");
+    return TTI->getShuffleCost(TargetTransformInfo::SK_Select, Ty, 0, nullptr);
+  }
+
+  if (ShuffleVectorInst::isTransposeMask(Mask)) {
+    LLVM_DEBUG(dbgs() << "Revec:   Transpose mask\n");
+    return TTI->getShuffleCost(TargetTransformInfo::SK_Transpose, Ty, 0, nullptr);
+  }
+
+  if (ShuffleVectorInst::isZeroEltSplatMask(Mask)) {
+    LLVM_DEBUG(dbgs() << "Revec:   Zero elt splat mask\n");
+    return TTI->getShuffleCost(TargetTransformInfo::SK_Broadcast, Ty, 0, nullptr);
+  }
+
+  if (ShuffleVectorInst::isSingleSourceMask(Mask)) {
+    LLVM_DEBUG(dbgs() << "Revec:   Single source mask\n");
+    return TTI->getShuffleCost(TargetTransformInfo::SK_PermuteSingleSrc, Ty, 0, nullptr);
+  }
+
+  if (isUnpackShuffle(Op0Ty, Mask, false, true) || isUnpackShuffle(Op0Ty, Mask, true, true)) {
+    LLVM_DEBUG(dbgs() << "Revec:   Unary unpack mask\n");
+    // TODO: Better estimate cost than using the Select cost
+    return TTI->getShuffleCost(TargetTransformInfo::SK_PermuteSingleSrc, Ty, 0, nullptr);
+  }
+
+  if (isUnpackShuffle(Op0Ty, Mask, false, false) || isUnpackShuffle(Op0Ty, Mask, true, false)) {
+    LLVM_DEBUG(dbgs() << "Revec:   Binary unpack mask\n");
+    // TODO: Better estimate cost than using the Select cost
+    return TTI->getShuffleCost(TargetTransformInfo::SK_Select, Ty, 0, nullptr);
+  }
+
+  LLVM_DEBUG(dbgs() << "Revec:   Permute two src\n");
+  return TTI->getShuffleCost(TargetTransformInfo::SK_PermuteTwoSrc, Ty, 0, nullptr);
 }
-#endif
 
 int BoUpSLP::getEntryCost(TreeEntry *E) {
   ArrayRef<Value*> VL = E->Scalars;
@@ -3079,9 +3102,7 @@ int BoUpSLP::getTreeCost() {
        << "Total = " << Cost << ".\n";
   }
   LLVM_DEBUG(dbgs() << Str);
-#ifndef NDEBUG
   printf("%s", Str.c_str());
-#endif
 
   if (WriteRevecTree)
     WriteGraph(this, "Revec" + F->getName(), false, Str);
