@@ -731,13 +731,8 @@ private:
   /// Checks if all users of \p I are the part of the vectorization tree.
   bool areAllUsersVectorized(Instruction *I) const;
 
-#if 0
-  /// \returns the cost of a particular shufflevector instruction based on type special cases.
-  int getShuffleCost(VectorType *Op0, VectorType *Op1, VectorType *Mask);
-#else
   /// \returns the cost of a particular shufflevector instruction based on mask special cases.
   int getShuffleCost(VectorType *Op0, VectorType *Op1, Constant *Mask);
-#endif
 
   /// \returns the cost of the vectorizable entry.
   int getEntryCost(TreeEntry *E);
@@ -2483,14 +2478,15 @@ int BoUpSLP::getShuffleCost(VectorType *Op0Ty, VectorType *Op1Ty, Constant *Mask
 
   if (isUnpackShuffle(Op0Ty, Mask, false, true) || isUnpackShuffle(Op0Ty, Mask, true, true)) {
     LLVM_DEBUG(dbgs() << "Revec:   Unary unpack mask\n");
-    // TODO: Better estimate cost than using the Select cost
+    // TODO: Better estimate cost than using the PermuteSingleSrc cost
     return TTI->getShuffleCost(TargetTransformInfo::SK_PermuteSingleSrc, Ty, 0, nullptr);
   }
 
   if (isUnpackShuffle(Op0Ty, Mask, false, false) || isUnpackShuffle(Op0Ty, Mask, true, false)) {
     LLVM_DEBUG(dbgs() << "Revec:   Binary unpack mask\n");
-    // TODO: Better estimate cost than using the Select cost
-    return TTI->getShuffleCost(TargetTransformInfo::SK_Select, Ty, 0, nullptr);
+    // TODO: Get cost with TTI->getOpcodeCost rather than this heuristic
+    // Estimate the cost of an unpack as 3 for 128 bit unpacks, 4 for 256 bit, and 5 for 256 bit
+    return Log2_32(Op0Ty->getPrimitiveSizeInBits()) - 4;
   }
 
   LLVM_DEBUG(dbgs() << "Revec:   Permute two src\n");
@@ -2769,6 +2765,8 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       int NarrowVecCallCost = VL.size() *
           TTI->getIntrinsicInstrCost(IID, ElementTy, NarrowArgTys, FMF);
 
+      LLVM_DEBUG(dbgs() << "Revec: Cost of " << VL.size() << " narrow calls like " << *CI << ", with intrinsic " << Intrinsic::getName(IID) << ", type " << *ElementTy << " = " << NarrowVecCallCost << "\n");
+
       if (NeedToShuffleReuses) {
         ReuseShuffleCost -=
             (ReuseShuffleNumbers - VL.size()) *
@@ -2796,6 +2794,8 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
 
       int FusedVecCallCost =
           TTI->getIntrinsicInstrCost(alt, wideReturnTy, WideArgTys, FMF);
+
+      LLVM_DEBUG(dbgs() << "Revec: Cost of widened call with intrinsic " << Intrinsic::getName(alt) << ", type " << *wideReturnTy << " = " << FusedVecCallCost << "\n");
 
       LLVM_DEBUG(dbgs() << "Revec: Calculated call cost " << ReuseShuffleCost << " + " << FusedVecCallCost << " - " << NarrowVecCallCost << " for calls:\n");
       for (Value *val : VL) {
