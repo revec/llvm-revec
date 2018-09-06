@@ -935,14 +935,12 @@ protected:
       case ShuffleBundleDecision::IndexOp0_IndexOp1_WidenMask: {
         ValueList LeftBundle, RightBundle;
         for (unsigned i = 0, Max = VL.size(); i < Max; ++i) {
-
           ShuffleVectorInst *Inst = cast<ShuffleVectorInst>(VL[i]);
           LeftBundle.push_back(
               Inst->getOperand(Op0Indices[i] ? 1 : 0));
           RightBundle.push_back(
               Inst->getOperand(Op0Indices[i] ? 0 : 1));
         }
-
 
         // Merge shuffle masks. First, determine the offset each original
         // operand will have in the final shufflevector.
@@ -980,6 +978,13 @@ protected:
             int32Ty = cast<Constant>(inst->getMask())->getAggregateElement(0U)->getType();
 
           for (int maskVal : inst->getShuffleMask()) {
+            if (maskVal == -1) {
+              MaskVector.push_back(UndefValue::get(int32Ty));
+              break;
+            }
+
+            assert(maskVal >= 0 && "Negative mask values not permitted");
+
             if (maskVal < originalOffset1)
               // This mask value indexed operand 0
               maskVal += maskShift0;
@@ -987,6 +992,17 @@ protected:
               // This mask value indexed operand 1
               maskVal += maskShift1;
 
+            assert(maskVal >= 0 && "Negative mask values not permitted");
+
+#ifndef NDEBUG
+            int totalElements = 0;
+            for (Value *val : LeftBundle)
+                totalElements += val->getType()->getVectorNumElements();
+            for (Value *val : RightBundle)
+                totalElements += val->getType()->getVectorNumElements();
+
+            assert(maskVal < totalElements && "Mask value indexes beyond length of shuffle");
+#endif
             MaskVector.push_back(ConstantInt::get(int32Ty, maskVal));
           }
         }
