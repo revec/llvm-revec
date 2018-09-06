@@ -497,8 +497,8 @@ static bool isSimple(Instruction *I) {
 /// Adapted from llvm::createUnpackShuffleMask (X86ISelLowering.h)
 static bool isUnpackShuffle(VectorType *OpTy, Constant *Mask, bool Lo,
                               bool Unary) {
-	Type *Ty = Mask->getType();
-	int NumElts = Ty->getVectorNumElements();
+  Type *Ty = Mask->getType();
+  int NumElts = Ty->getVectorNumElements();
   int NumEltsInLane = 128 / OpTy->getScalarSizeInBits();
 
   for (int i = 0; i < NumElts; ++i) {
@@ -510,6 +510,33 @@ static bool isUnpackShuffle(VectorType *OpTy, Constant *Mask, bool Lo,
     if (Mask->containsUndefElement() || El == nullptr || (int) El->getUniqueInteger().getLimitedValue() != Pos)
       return false;
   }
+
+  return true;
+}
+
+static int getSignedSpacing(Constant *Mask, unsigned i, unsigned j) {
+  unsigned NumElts = Mask->getType()->getVectorNumElements();
+  assert(i < NumElts && j < NumElts && "Indexes out of bounds for Constant");
+  Constant *L = Mask->getAggregateElement(i);
+  Constant *R = Mask->getAggregateElement(j);
+  if (L == nullptr || R == nullptr)
+    // FIXME: Inelegant, large poison value
+    return NumElts*100;
+
+  int LVal = L->getUniqueInteger().getLimitedValue();
+  int RVal = R->getUniqueInteger().getLimitedValue();
+  return RVal - LVal;
+}
+
+static bool isAlternatingShuffleMask(Constant *Mask) {
+  unsigned NumElts = Mask->getType()->getVectorNumElements();
+  if (NumElts < 2)
+    return false;
+
+  int spacing = getSignedSpacing(Mask, 0, 1);
+  for (unsigned i = 2; i < NumElts - 1; i += 2)
+    if (getSignedSpacing(Mask, i, i+1) != spacing)
+      return false;
 
   return true;
 }
@@ -2503,6 +2530,11 @@ int BoUpSLP::getShuffleCost(VectorType *Op0Ty, VectorType *Op1Ty, Constant *Mask
     LLVM_DEBUG(dbgs() << "Revec:   Binary unpack mask\n");
     // TODO: Get cost with TTI->getOpcodeCost rather than this heuristic
     // Estimate the cost of an unpack as 3 for 128 bit unpacks, 4 for 256 bit, and 5 for 256 bit
+    return Log2_32(Op0Ty->getPrimitiveSizeInBits()) - 4;
+  }
+
+  if (isAlternatingShuffleMask(Mask)) {
+    LLVM_DEBUG(dbgs() << "Revec:   Alternating mask\n");
     return Log2_32(Op0Ty->getPrimitiveSizeInBits()) - 4;
   }
 
