@@ -140,7 +140,7 @@ static cl::opt<int> MinVectorRegSizeOption(
     cl::desc("Attempt to vectorize for this register size in bits"));
 
 static cl::opt<unsigned> RecursionMaxDepth(
-    "revec-recursion-max-depth", cl::init(12), cl::Hidden,
+    "revec-recursion-max-depth", cl::init(30), cl::Hidden,
     cl::desc("Limit the recursion depth when building a vectorizable tree"));
 
 static cl::opt<unsigned> MinTreeSize(
@@ -980,7 +980,6 @@ protected:
             int32Ty = cast<Constant>(inst->getMask())->getAggregateElement(0U)->getType();
 
           for (int maskVal : inst->getShuffleMask()) {
-            int originalMaskVal = maskVal;
             if (maskVal < originalOffset1)
               // This mask value indexed operand 0
               maskVal += maskShift0;
@@ -2841,28 +2840,22 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       }
 
       LLVM_DEBUG(dbgs() << "Revec: Getting cost of shuffle vector bundle:\n");
-#ifndef DEBUG
       for (Value *val : VL) {
         LLVM_DEBUG(dbgs() << "Revec:   " << *val << "\n");
       }
-#endif
       // assert(getBundleDecision(VL).hasValue() && "Attempting to get cost of non-vectorized shuffle bundle");
 
       int NarrowVecCost = 0;
+      SmallVector<Constant *, 4> Masks;
       for (Value *i : VL) {
         ShuffleVectorInst *I = cast<ShuffleVectorInst>(i);
+        Masks.push_back(I->getMask());
 
         // Get the cost of this shuffle
         NarrowVecCost += getInstructionThroughput(I, 1);
-
-            // getShuffleCost(cast<VectorType>(I->getOperand(0)->getType()),
-            //               cast<VectorType>(I->getOperand(1)->getType()),
-            //               cast<VectorType>(I->getMask()->getType()));
-            //
       }
 
-      // TODO: improve getShuffleCost to better match TTI->getInstructionCost(Instruction)
-      // OR TODO: Pre-vectorize this bundle and use TTI->getInstructionCost
+      // TODO: Speculatively lower shuffle IR nodes to properly determine cost. There are many low-cost shuffle targets.
 
       LLVM_DEBUG(dbgs() << "Revec: getEntryCost: Prior to getShuffleBundle, ShuffleCache contents:\n");
       for (unsigned i = 0; i < ShuffleCache.size(); ++i) {
@@ -2873,15 +2866,9 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       const auto& decision = getShuffleBundleDecision(VL);
 
       LLVM_DEBUG(dbgs() << "Revec: getEntryCost: Found decision with merge mode " << decision.MergeMode << " and bundle: \n");
-#if 1
       for (Value *val : decision.VL) {
         LLVM_DEBUG(dbgs() << "Revec:   " << val << " = " << *val << "\n");
       }
-#else
-      LLVM_DEBUG(dbgs() << "Revec:     " << decision.VL01.first << " = " << *decision.VL01.first << "\n");
-      if (decision.BundleSize > 1)
-        LLVM_DEBUG(dbgs() << "Revec:     " << decision.VL01.second << " = " << *decision.VL01.second << "\n");
-#endif
 
       int FusedVecCost = 0;
       switch (decision.MergeMode) {
@@ -2889,7 +2876,11 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
 					assert(decision.Mask != nullptr && "Need mask to estimate cost");
           VectorType *WideOp0Ty = getVectorType(VL0->getOperand(0)->getType(), VL.size());
           VectorType *WideOp1Ty = getVectorType(VL0->getOperand(1)->getType(), VL.size());
-          FusedVecCost = getShuffleCost(WideOp0Ty, WideOp1Ty, decision.Mask);
+          if (isSplat(Masks))
+            // Catch-all special case special shuffles like psrdq
+            FusedVecCost = Log2_32(WideOp0Ty->getPrimitiveSizeInBits()) - 4;
+          else
+            FusedVecCost = getShuffleCost(WideOp0Ty, WideOp1Ty, decision.Mask);
           break;
         }
         case ShuffleBundleDecision::FirstOp0_FirstOp1_ConcatenateMask:
