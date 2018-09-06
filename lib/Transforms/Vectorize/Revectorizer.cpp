@@ -961,6 +961,14 @@ protected:
           offset += VL[i]->getType()->getVectorNumElements();
         }
 
+#ifndef NDEBUG
+        int totalElements = 0;
+        for (Value *val : LeftBundle)
+            totalElements += val->getType()->getVectorNumElements();
+        for (Value *val : RightBundle)
+            totalElements += val->getType()->getVectorNumElements();
+#endif
+
         // Now, find the original offset of the operands of the bundle and
         // update the mask
         Type *int32Ty = nullptr;
@@ -980,7 +988,7 @@ protected:
           for (int maskVal : inst->getShuffleMask()) {
             if (maskVal == -1) {
               MaskVector.push_back(UndefValue::get(int32Ty));
-              break;
+              continue;
             }
 
             assert(maskVal >= 0 && "Negative mask values not permitted");
@@ -995,12 +1003,6 @@ protected:
             assert(maskVal >= 0 && "Negative mask values not permitted");
 
 #ifndef NDEBUG
-            int totalElements = 0;
-            for (Value *val : LeftBundle)
-                totalElements += val->getType()->getVectorNumElements();
-            for (Value *val : RightBundle)
-                totalElements += val->getType()->getVectorNumElements();
-
             assert(maskVal < totalElements && "Mask value indexes beyond length of shuffle");
 #endif
             MaskVector.push_back(ConstantInt::get(int32Ty, maskVal));
@@ -3772,6 +3774,18 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
         LLVM_DEBUG(dbgs() << "Revec: Diamond merged for " << *VL0 << ".\n");
         return E->VectorizedValue;
       }
+
+#if 0
+#ifndef NDEBUG
+      Type *SrcVecTy = SrcVec->getType();
+      if (!llvm::isPowerOf2_32(SrcVecTy->getVectorNumElements())) {
+        LLVM_DEBUG(outs() << "Bad vectorized src type " << *SrcVecTy << "\n");
+        User *SrcVecAsUser = dyn_cast<User>(SrcVec);
+        BinaryOperator *SrcVecAsBinOp = dyn_cast<BinaryOperator>(SrcVec);
+        assert(false);
+      }
+#endif
+#endif
 
       CastInst *CI = dyn_cast<CastInst>(VL0);
       Value *V = Builder.CreateCast(CI->getOpcode(), SrcVec, VecTy);
