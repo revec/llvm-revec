@@ -3616,7 +3616,7 @@ Value *BoUpSLP::Gather(ArrayRef<Value *> VL, VectorType *Ty) {
     gathered = Gather_extract_insert(VL, Ty);
   } else {
     assert(isPowerOf2_32(size) && size > 1 && "Gathering value list that is not of a power of two length greater than 1");
-#if 1
+#if 0
     gathered = concatenateVectors(Builder, VL);
 #else
     gathered = Gather_rec(VL, Ty, 0, size);
@@ -3690,7 +3690,28 @@ Value *BoUpSLP::Gather_two(Value *L, Value *R) {
     GatherSeq.insert(I);
     CSEBlocks.insert(I->getParent());
 
-#ifndef NDEBUG
+		// Add to our 'need-to-extract' list.
+		if (TreeEntry *E = getTreeEntry(L)) {
+			int FoundLane = 0;
+			if (!E->ReuseShuffleIndices.empty()) {
+				// FIXME: Is this needed?
+				FoundLane = std::distance(E->ReuseShuffleIndices.begin(),
+																	llvm::find(E->ReuseShuffleIndices, FoundLane));
+			}
+			ExternalUses.push_back(ExternalUser(L, I, FoundLane));
+		}
+
+		if (TreeEntry *E = getTreeEntry(R)) {
+			int FoundLane = 1;
+			if (!E->ReuseShuffleIndices.empty()) {
+				// FIXME: Is this needed?
+				FoundLane = std::distance(E->ReuseShuffleIndices.begin(),
+																	llvm::find(E->ReuseShuffleIndices, FoundLane));
+			}
+			ExternalUses.push_back(ExternalUser(R, I, FoundLane));
+		}
+
+#if 0
     // FIXME: It may in fact be possible for a value to be vectorized
     // (i.e. in a tree entry - non-vectorized values are not in the ScalartoTreeEntry map),
     // but gathered with some other values. This would require an extract, which is currently not
