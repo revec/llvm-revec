@@ -313,6 +313,32 @@ static Value *isOneOf(Value *OpValue, Value *Op) {
   return OpValue;
 }
 
+static Constant *getMaskForSwappedOperands(Type *SrcTy, Constant *Mask) {
+  SmallVector<Constant *, 32> SwappedMask;
+
+  unsigned NumSrcElts = SrcTy->getVectorNumElements();
+  unsigned NumMaskElts = Mask->getType()->getVectorNumElements();
+  Type *int32Ty = cast<VectorType>(Mask->getType())->getElementType();
+  Constant *Undef = UndefValue::get(int32Ty);
+
+  for (unsigned i = 0; i < NumMaskElts; ++i) {
+    Constant *El = Mask->getAggregateElement(i);
+    if (El == nullptr || dyn_cast<UndefValue>(El) != nullptr) {
+      SwappedMask.push_back(Undef);
+    } else {
+      int maskVal = El->getUniqueInteger().getLimitedValue();
+      if (maskVal < NumSrcElts)
+        maskVal += (int) NumSrcElts;
+      else
+        maskVal -= (int) NumSrcElts;
+
+      SwappedMask.push_back(ConstantInt::get(int32Ty, maskVal));
+    }
+  }
+  
+  return ConstantVector::get(SwappedMask);
+}
+
 namespace {
 
 /// Contains data for the instructions going to be vectorized.
@@ -895,7 +921,9 @@ private:
 
       // If we have a bundle of shuffles that extract consecutive subvectors from the same source vector,
       // delete the shufflevector bundle and use the source operand as the vectorized value.
-      FirstOp0 = 5
+      FirstOp0 = 5,
+
+			Diagonal_VF2 = 6
     };
 
     /// Encodes a merger strategy for the bundle of ShuffleVectors
@@ -1040,6 +1068,32 @@ protected:
         LLVM_DEBUG(dbgs() << "Revec: Created mask for shuffle merge mode IndexOp0_IndexOp1_MergeMask: " << *Mask << "\n");
         break;
       }
+			case ShuffleBundleDecision::Diagonal_VF2: {
+        // Remap mask 2 (a flip)
+        assert(VL.size() == 2);
+
+        ShuffleVectorInst *SI0 = cast<ShuffleVectorInst>(VL[0]);
+        Constant *Mask0 = SI0->getMask();
+        
+        ShuffleVectorInst *SI1 = cast<ShuffleVectorInst>(VL[1]);
+        Constant *Mask1 = getMaskForSwappedOperands(
+                            SI1->getOperand(0)->getType(),
+                            SI1->getMask());
+        LLVM_DEBUG(dbgs() << "Revec: Created mask for shuffle merge mode Diagonal_VF2\n");
+
+        SmallVector<Constant *, 32> wideMask;
+
+        unsigned i = 0;
+        while (Constant *scalar = Mask0->getAggregateElement(i++))
+          wideMask.push_back(scalar);
+
+        i = 0;
+        while (Constant *scalar = Mask1->getAggregateElement(i++))
+          wideMask.push_back(scalar);
+
+        Mask = ConstantVector::get(wideMask);
+        break;
+			}
     }
   }
 };
@@ -2388,6 +2442,27 @@ switch (ShuffleOrOp) {
         return;
       }
 
+			if (VL.size() == 2) {
+				Left.clear();
+				Right.clear();
+
+				ShuffleVectorInst *I = cast<ShuffleVectorInst>(VL[0]);
+				Left.push_back(I->getOperand(0));
+				Right.push_back(I->getOperand(1));
+
+				I = cast<ShuffleVectorInst>(VL[1]);
+				Left.push_back(I->getOperand(1));
+				Right.push_back(I->getOperand(0));
+
+				if (isSplat(Left) && isSplat(Right)) {
+					OperandIndices dummyIndices;
+					ShuffleCache.emplace_back(VL, ShuffleBundleDecision::Diagonal_VF2, dummyIndices, nullptr);
+					newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
+					LLVM_DEBUG(dbgs() << "Revec: added a ShuffleVector op for mode Diagonal_VF2.\n");
+					return;
+				}
+			}
+
       // Default to a gather if we haven't encountered a special case.
       // TODO: Search recursively for optimal bundle indexes, with backtracking
       LLVM_DEBUG(dbgs() << "Revec: non-vectorizable ShuffleVector bundle.\n");
@@ -2950,7 +3025,8 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
           break;
         }
         case ShuffleBundleDecision::FirstOp0_FirstOp1_ConcatenateMask:
-        case ShuffleBundleDecision::FirstOp0_MergeOp1_ConcatenateMask: {
+        case ShuffleBundleDecision::FirstOp0_MergeOp1_ConcatenateMask:
+        case ShuffleBundleDecision::Diagonal_VF2: {
 					assert(decision.Mask != nullptr && "Need mask to estimate cost");
           VectorType *NarrowOp0Ty = cast<VectorType>(VL0->getOperand(0)->getType());
           VectorType *NarrowOp1Ty = cast<VectorType>(VL0->getOperand(0)->getType());
@@ -4237,6 +4313,16 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
                            ? FirstInst->getOperand(1) // Simply use the first shuffle's operand 1
                            : decision.Op1Value; // The merged operand 1 was precomputed in buildTree_rec
 
+          V = Builder.CreateShuffleVector(Op0, Op1, decision.Mask);
+          break;
+        }
+        case ShuffleBundleDecision::Diagonal_VF2: {
+          assert((decision.Mask != nullptr) && "No mask available");
+
+          // Use Op0 and Op1 from VL0, and decision.Mask
+          ShuffleVectorInst *FirstInst = cast<ShuffleVectorInst>(E->Scalars[0]);
+          Value *Op0 = FirstInst->getOperand(0);
+          Value *Op1 = FirstInst->getOperand(1);
           V = Builder.CreateShuffleVector(Op0, Op1, decision.Mask);
           break;
         }
