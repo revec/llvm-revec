@@ -327,7 +327,7 @@ static Constant *getMaskForSwappedOperands(Type *SrcTy, Constant *Mask) {
       SwappedMask.push_back(Undef);
     } else {
       int maskVal = El->getUniqueInteger().getLimitedValue();
-      if (maskVal < NumSrcElts)
+      if (maskVal < (int) NumSrcElts)
         maskVal += (int) NumSrcElts;
       else
         maskVal -= (int) NumSrcElts;
@@ -335,7 +335,7 @@ static Constant *getMaskForSwappedOperands(Type *SrcTy, Constant *Mask) {
       SwappedMask.push_back(ConstantInt::get(int32Ty, maskVal));
     }
   }
-  
+
   return ConstantVector::get(SwappedMask);
 }
 
@@ -923,7 +923,7 @@ private:
       // delete the shufflevector bundle and use the source operand as the vectorized value.
       FirstOp0 = 5,
 
-			Diagonal_VF2 = 6
+      Diagonal_VF2 = 6
     };
 
     /// Encodes a merger strategy for the bundle of ShuffleVectors
@@ -2345,12 +2345,19 @@ switch (ShuffleOrOp) {
           unsigned expected_mask_value = 0;
           bool isSequentialMask = true;
           for (Constant * mask : Masks) {
-            for (unsigned i = 0; i < mask->getNumOperands(); ++i) {
-              ConstantInt *CI = dyn_cast<ConstantInt>(mask->getOperand(i));
+            LLVM_DEBUG(dbgs() << "Revec: Checking mask " << *mask << " for sequentiality\n");
+
+            for (unsigned i = 0; i < mask->getType()->getVectorNumElements(); ++i) {
+              Value *Opi = mask->getAggregateElement(i);
+              ConstantInt *CI = dyn_cast<ConstantInt>(Opi);
+              LLVM_DEBUG(dbgs() << "Revec:   Mask operand at index " << i << " = " << *Opi << ". Testing if equal to " << expected_mask_value << "\n");
               if (CI == nullptr || !CI->equalsInt(expected_mask_value)) {
+                LLVM_DEBUG(dbgs() << "Revec:     Not equal! Mask is not sequential.\n");
                 isSequentialMask = false;
                 break;
               }
+
+              LLVM_DEBUG(dbgs() << "Revec:     Equal. Mask may be sequential.\n");
 
               ++expected_mask_value;
             }
@@ -3907,13 +3914,19 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
     case Instruction::Trunc:
     case Instruction::FPTrunc:
     case Instruction::BitCast: {
+      LLVM_DEBUG(dbgs() << "Revec: Vectorizing cast bundle\n");
       ValueList SrcVL;
-      for (Value *V : E->Scalars)
+      for (Value *V : E->Scalars) {
+        LLVM_DEBUG(dbgs() << "Revec:   " << *V << "\n");
         SrcVL.push_back(cast<Instruction>(V)->getOperand(0));
+      }
 
       setInsertPointAfterBundle(E->Scalars, VL0);
 
       Value *SrcVec = vectorizeTree(SrcVL);
+      LLVM_DEBUG(dbgs() << "Revec: Vectorized source operands for cast bundle starting with " << *VL0 << "\n");
+      LLVM_DEBUG(dbgs() << "Revec:   Widened source: " << *SrcVec << "\n");
+      LLVM_DEBUG(dbgs() << "Revec:   Destination type: " << *VecTy << "\n");
 
       if (E->VectorizedValue) {
         LLVM_DEBUG(dbgs() << "Revec: Diamond merged for " << *VL0 << ".\n");
@@ -4440,6 +4453,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
         return E->VectorizedValue;
       }
 
+      LLVM_DEBUG(dbgs() << "Revec: Emitting revectorized shuffle: " << *V << "\n");
       assert(V && "Unable to merge shuffles");
       E->VectorizedValue = V;
       ++NumVectorInstructions;
