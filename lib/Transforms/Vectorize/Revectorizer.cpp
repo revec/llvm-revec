@@ -2188,7 +2188,11 @@ switch (ShuffleOrOp) {
     Intrinsic::ID IID = getIntrinsicByCall(CI);
 
     if (IID != Intrinsic::not_intrinsic) {
-      LLVM_DEBUG(dbgs() << "Revec: Found intrinsic function " << llvm::Intrinsic::getName(IID) << "\n");
+      if (llvm::Intrinsic::isOverloaded(IID))
+				// TODO: Use other implementation of getName
+				LLVM_DEBUG(dbgs() << "Revec: Found intrinsic function overloading: " << IID << "\n");
+			else
+				LLVM_DEBUG(dbgs() << "Revec: Found intrinsic function " << IID << ", " << llvm::Intrinsic::getName(IID) << "\n");
 
       // Find intrinsic conversion and merge factor
       const auto& target = getWidenedIntrinsic(IID, VL.size());
@@ -2198,8 +2202,12 @@ switch (ShuffleOrOp) {
       if (alt != Intrinsic::not_intrinsic && VF > 0) {
         assert(VF == static_cast<long>(VL.size()) && "getWidenedIntrinsic returned a VF not requested");
 
-        LLVM_DEBUG(dbgs() << "Revec:   possible conversion: " << llvm::Intrinsic::getName(alt)
-                << " widening factor: " << VF << ".\n");
+				if (llvm::Intrinsic::isOverloaded(alt))
+					LLVM_DEBUG(dbgs() << "Revec:   possible conversion (overloading): " << alt
+									<< " widening factor: " << VF << ".\n");
+				else
+					LLVM_DEBUG(dbgs() << "Revec:   possible conversion: " << llvm::Intrinsic::getName(alt)
+									<< " widening factor: " << VF << ".\n");
 
         newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
 
@@ -2219,7 +2227,11 @@ switch (ShuffleOrOp) {
         LLVM_DEBUG(dbgs()
             << "Revec:   no conversion found.\n"
             << "Revec:     First narrow call: " << *CI << "\n"
-            << "Revec:     Narrow key: " << static_cast<unsigned>(IID) << " name: " << llvm::Intrinsic::getName(IID) << "\n");
+            << "Revec:     Narrow key: " << static_cast<unsigned>(IID));
+				if (!llvm::Intrinsic::isOverloaded(IID))
+					LLVM_DEBUG(dbgs() << " name: " << llvm::Intrinsic::getName(IID) << "\n");
+				else
+					LLVM_DEBUG(dbgs() << " (overloading)\n");
       }
     }
 
@@ -2814,7 +2826,9 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       int NarrowVecCallCost = VL.size() *
           TTI->getIntrinsicInstrCost(IID, ElementTy, NarrowArgTys, FMF);
 
-      LLVM_DEBUG(dbgs() << "Revec: Cost of " << VL.size() << " narrow calls like " << *CI << ", with intrinsic " << Intrinsic::getName(IID) << ", type " << *ElementTy << " = " << NarrowVecCallCost << "\n");
+      LLVM_DEBUG(dbgs() << "Revec: Cost of " << VL.size() << " narrow calls like " << *CI << ", with intrinsic "
+												<< (llvm::Intrinsic::isOverloaded(IID) ? std::to_string(IID) : Intrinsic::getName(IID).str())
+												<< ", type " << *ElementTy << " = " << NarrowVecCallCost << "\n");
 
       if (NeedToShuffleReuses) {
         ReuseShuffleCost -=
@@ -2844,7 +2858,9 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       int FusedVecCallCost =
           TTI->getIntrinsicInstrCost(alt, wideReturnTy, WideArgTys, FMF);
 
-      LLVM_DEBUG(dbgs() << "Revec: Cost of widened call with intrinsic " << Intrinsic::getName(alt) << ", type " << *wideReturnTy << " = " << FusedVecCallCost << "\n");
+      LLVM_DEBUG(dbgs() << "Revec: Cost of widened call with intrinsic "
+												<< (llvm::Intrinsic::isOverloaded(alt) ? std::to_string(alt) : Intrinsic::getName(alt).str())
+												<< ", type " << *wideReturnTy << " = " << FusedVecCallCost << "\n");
 
       LLVM_DEBUG(dbgs() << "Revec: Calculated call cost " << ReuseShuffleCost << " + " << FusedVecCallCost << " - " << NarrowVecCallCost << " for calls:\n");
       for (Value *val : VL) {
@@ -4067,7 +4083,9 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       }
 
       assert(IID != Intrinsic::not_intrinsic);
-      LLVM_DEBUG(dbgs() << "Revec: Vectorizing intrinsic function " << llvm::Intrinsic::getName(IID) << "\n");
+      LLVM_DEBUG(dbgs() << "Revec: Vectorizing intrinsic function "
+												<< (llvm::Intrinsic::isOverloaded(IID) ? std::to_string(IID) : llvm::Intrinsic::getName(IID).str())
+												<< "\n");
 
       const auto& target = getWidenedIntrinsic(IID, E->Scalars.size());
       int VF = target.first;
@@ -4079,8 +4097,9 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       assert((VF == static_cast<long>(E->Scalars.size())) && "Cannot bundle intrinsic calls, where known widening factor does not match bundle size.");
 
       // Find intrinsic conversion and merge factor
-      LLVM_DEBUG(dbgs() << "Revec:   translation: " << llvm::Intrinsic::getName(alt)
-                   << " widening factor: " << VF << ".\n");
+      LLVM_DEBUG(dbgs() << "Revec:   translation: "
+												<< (llvm::Intrinsic::isOverloaded(alt) ? std::to_string(alt) : llvm::Intrinsic::getName(alt).str())
+												<< " widening factor: " << VF << ".\n");
 
       ValueList args;
       for (unsigned i = 0, e = CI->getNumArgOperands(); i != e; ++i) {
@@ -5249,6 +5268,7 @@ bool RevectorizerPass::vectorizeStoreChain(ArrayRef<Value *> Chain, BoUpSLP &R,
   const unsigned ChainLen = Chain.size();
   LLVM_DEBUG(dbgs() << "Revec: Analyzing a store chain of length " << ChainLen
         << "\n");
+  printf("Revec: Analyzing a store chain of length %d\n", (int) ChainLen);
   for (auto *StoreValue : Chain) {
     LLVM_DEBUG(dbgs() << "Revec:   " << *StoreValue << "\n");
   }
