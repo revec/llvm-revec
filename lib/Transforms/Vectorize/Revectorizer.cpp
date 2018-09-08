@@ -1,4 +1,4 @@
-//===- Revectorizer.cpp - A bottom up SLP-style Vectorizer for vector fusion -----===//
+//===a Revectorizer.cpp - A bottom up SLP-style Vectorizer for vector fusion -----===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -620,17 +620,29 @@ static Constant *concatenateTwoConstantVectors(Value *Left, Value *Right) {
 }
 
 static Constant *mergeIfConstantVectors(ArrayRef<Value *> Operands) {
+  LLVM_DEBUG(
+    dbgs() << "Revec: Testing operands for mergeability:\n";
+    for (Value *val : Operands)
+      dbgs() << "Revec:   " << *val << "\n";
+  );
+
   // Operands must be constants of the same type to be merged
-  if (!allConstant(Operands) || !allSameType(Operands))
+  if (!allConstant(Operands) || !allSameType(Operands)) {
+    LLVM_DEBUG(dbgs() << "Revec: Operands not mergable as not all constant or all same type\n");
     return nullptr;
+  }
 
   // All operands must be vectors
   const VectorType *VecTy = dyn_cast<VectorType>(Operands[0]->getType());
-  if (!VecTy)
+  if (!VecTy) {
+    LLVM_DEBUG(dbgs() << "Revec: Operands not mergable as not vector type\n");
     return nullptr;
+  }
 
   Type *ElTy = VecTy->getElementType();
-  const unsigned NumElt = VecTy->getNumElements();
+  const unsigned NumElt = VecTy->getVectorNumElements();
+  LLVM_DEBUG(dbgs() << "Revec:   Merging len " << NumElt << " constant vectors\n");
+  assert(NumElt > 0 && "Empty constant to merge");
 
   // Initialize a vector of UndefValue
   SmallVector<Constant *, 32> merged;
@@ -642,18 +654,30 @@ static Constant *mergeIfConstantVectors(ArrayRef<Value *> Operands) {
 
     for (unsigned i = 0; i < NumElt; ++i) {
       Constant *nextScalar = CVec->getAggregateElement(i);
+      LLVM_DEBUG(dbgs() << "Revec:   Merging at lane " << i << " with scalar " << *nextScalar << "\n");
 
-      if (dyn_cast<UndefValue>(nextScalar) != nullptr) {
-        if (dyn_cast<UndefValue>(merged[i]) != nullptr)
-          // Lane i has more than one non-undef value in the opreands
+      if (dyn_cast<UndefValue>(nextScalar) == nullptr) {
+        if (dyn_cast<UndefValue>(merged[i]) == nullptr && merged[i] != nextScalar) {
+          // Lane i has multiple, differing non-undef values
           return nullptr;
+        }
 
         merged[i] = nextScalar;
       }
     }
   }
 
-  return ConstantVector::get(merged);
+  Constant *Merged = ConstantVector::get(merged);
+  LLVM_DEBUG(dbgs() << "Revec:   (in merge method) Merged Op1: " << *Merged << "\n");
+  //LLVM_DEBUG(
+  //  bool opsContainUndef = false;
+  //  for (Value *Op : Operands)
+  //    opsContainUndef |= cast<Constant>(Op)->containsUndefElement();
+  //  if (opsContainUndef) {
+  //    assert(
+  //  }
+  //);
+  return Merged;
 }
 
 namespace llvm {
@@ -953,15 +977,15 @@ private:
 
   explicit ShuffleBundleDecision(ArrayRef<Value *> VL, int MergeMode, OperandIndices Op0Indices, Value *Op1Value)
     : MergeMode(MergeMode),
-      Op0Indices(Op0Indices),
-      Op1Value(Op1Value) {
+      Op0Indices(Op0Indices) {
+    this->Op1Value = Op1Value;
     initializeVL(VL);
     initializeMask();
   }
 
   explicit ShuffleBundleDecision(ArrayRef<Value *> VL, int MergeMode, Value *Op1Value)
-    : MergeMode(MergeMode),
-      Op1Value(Op1Value) {
+    : MergeMode(MergeMode) {
+    this->Op1Value = Op1Value;
     initializeVL(VL);
     initializeMask();
   }
@@ -2405,7 +2429,7 @@ switch (ShuffleOrOp) {
       }
 
       Constant *MergedOp1 = mergeIfConstantVectors(Right);
-      if (MergedOp1) {
+      if (MergedOp1 != nullptr) {
         // Left is merged by taking operand 0 from VL[0]
         // Right is merged by taking non-undefined elements from each lane
         OperandIndices dummyIndices;
@@ -2413,6 +2437,8 @@ switch (ShuffleOrOp) {
         newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
         LLVM_DEBUG(dbgs() << "Revec: added a ShuffleVector op for mode "
                               "FirstOp0_MergeOp1_ConcatentateMask.\n");
+        LLVM_DEBUG(dbgs() << "Revec:   MergedOp1: " << *(ShuffleCache.back().Op1Value) << "\n");
+        LLVM_DEBUG(dbgs() << "Revec:   Mask: " << *(ShuffleCache.back().Mask) << "\n");
         return;
       }
     }
