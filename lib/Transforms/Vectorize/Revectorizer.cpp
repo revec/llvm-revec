@@ -1845,515 +1845,359 @@ for (TreeEntry &EIdx : VectorizableTree) {
 
 void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
                           int UserTreeIdx) {
-assert((allConstant(VL) || allSameType(VL)) && "Invalid types!");
+  assert((allConstant(VL) || allSameType(VL)) && "Invalid types!");
 
-// Ensure that all values are narorw vectors
-for (Value *val : VL) {
-  // TODO: What is the return of gep instructions?
-  if (dyn_cast<StoreInst>(val) || dyn_cast<GetElementPtrInst>(val)) {
-    // StoreInst returns void, but forms a valid bundle. Skip type checks.
-    continue;
+  // Ensure that all values are narorw vectors
+  for (Value *val : VL) {
+    // TODO: What is the return of gep instructions?
+    if (dyn_cast<StoreInst>(val) || dyn_cast<GetElementPtrInst>(val)) {
+      // StoreInst returns void, but forms a valid bundle. Skip type checks.
+      continue;
+    }
+
+    Type *Ty = val->getType();
+    if (!isValidElementType(Ty)) {
+      LLVM_DEBUG(dbgs() << "Revec: This bundle has invalid element type: " << *Ty << " for value: " << *val << "\n");
+      newTreeEntry(VL, false, UserTreeIdx);
+      return;
+    }
+
+    if (!isNarrowVectorType(Ty)) {
+      LLVM_DEBUG(dbgs() << "Revec: This bundle has invalid element type: " << *Ty << " for value: " << *val << "\n");
+      newTreeEntry(VL, false, UserTreeIdx);
+      return;
+    }
   }
 
-  Type *Ty = val->getType();
-  if (!isValidElementType(Ty)) {
-    LLVM_DEBUG(dbgs() << "Revec: This bundle has invalid element type: " << *Ty << " for value: " << *val << "\n");
+  InstructionsState S = getSameOpcode(VL);
+  if (Depth == RecursionMaxDepth) {
+    LLVM_DEBUG(dbgs() << "Revec: Gathering due to max recursion depth.\n");
     newTreeEntry(VL, false, UserTreeIdx);
     return;
   }
 
-  if (!isNarrowVectorType(Ty)) {
-    LLVM_DEBUG(dbgs() << "Revec: This bundle has invalid element type: " << *Ty << " for value: " << *val << "\n");
-    newTreeEntry(VL, false, UserTreeIdx);
-    return;
-  }
-}
+  if (StoreInst *SI = dyn_cast<StoreInst>(S.OpValue))
+    if (!SI->getValueOperand()->getType()->isVectorTy()) {
+      LLVM_DEBUG(dbgs() << "Revec: Gathering due to non-vector store value type.\n");
+      newTreeEntry(VL, false, UserTreeIdx);
+      return;
+    }
 
-InstructionsState S = getSameOpcode(VL);
-if (Depth == RecursionMaxDepth) {
-  LLVM_DEBUG(dbgs() << "Revec: Gathering due to max recursion depth.\n");
-  newTreeEntry(VL, false, UserTreeIdx);
-  return;
-}
-
-if (StoreInst *SI = dyn_cast<StoreInst>(S.OpValue))
-  if (!SI->getValueOperand()->getType()->isVectorTy()) {
-    LLVM_DEBUG(dbgs() << "Revec: Gathering due to non-vector store value type.\n");
+  // If all of the operands are identical or constant we have a simple solution.
+  if (allConstant(VL) || isSplat(VL) || !allSameBlock(VL) || !S.Opcode) {
+    LLVM_DEBUG(dbgs() << "Revec: Gathering due to C,S,B,O. \n");
     newTreeEntry(VL, false, UserTreeIdx);
     return;
   }
 
-// If all of the operands are identical or constant we have a simple solution.
-if (allConstant(VL) || isSplat(VL) || !allSameBlock(VL) || !S.Opcode) {
-  LLVM_DEBUG(dbgs() << "Revec: Gathering due to C,S,B,O. \n");
-  newTreeEntry(VL, false, UserTreeIdx);
-  return;
-}
+  // We now know that this is a vector of instructions of the same type from
+  // the same block.
 
-// We now know that this is a vector of instructions of the same type from
-// the same block.
+  // Don't vectorize ephemeral values.
+  for (unsigned i = 0, e = VL.size(); i != e; ++i) {
+    if (EphValues.count(VL[i])) {
+      LLVM_DEBUG(dbgs() << "Revec: The instruction (" << *VL[i] <<
+            ") is ephemeral.\n");
+      newTreeEntry(VL, false, UserTreeIdx);
+      return;
+    }
+  }
 
-// Don't vectorize ephemeral values.
-for (unsigned i = 0, e = VL.size(); i != e; ++i) {
-  if (EphValues.count(VL[i])) {
-    LLVM_DEBUG(dbgs() << "Revec: The instruction (" << *VL[i] <<
-          ") is ephemeral.\n");
+  // Check if this is a duplicate of another entry.
+  if (TreeEntry *E = getTreeEntry(S.OpValue)) {
+    LLVM_DEBUG(dbgs() << "Revec: \tChecking bundle: " << *S.OpValue << ".\n");
+    if (!E->isSame(VL)) {
+      LLVM_DEBUG(dbgs() << "Revec: Gathering due to partial overlap.\n");
+      newTreeEntry(VL, false, UserTreeIdx);
+      return;
+    }
+    // Record the reuse of the tree node.  FIXME, currently this is only used to
+    // properly draw the graph rather than for the actual vectorization.
+    E->UserTreeIndices.push_back(UserTreeIdx);
+    LLVM_DEBUG(dbgs() << "Revec: Perfect diamond merge at " << *S.OpValue << ".\n");
+    return;
+  }
+
+  // Check that none of the instructions in the bundle are already in the tree.
+  for (unsigned i = 0, e = VL.size(); i != e; ++i) {
+    auto *I = dyn_cast<Instruction>(VL[i]);
+    if (!I)
+      continue;
+    if (getTreeEntry(I)) {
+      LLVM_DEBUG(dbgs() << "Revec: The instruction (" << *VL[i] <<
+            ") is already in tree.\n");
+      newTreeEntry(VL, false, UserTreeIdx);
+      return;
+    }
+  }
+
+  // If any of the narrow vectors is marked as a value that needs to stay narrow, then
+  // we need to gather the narrow vectors.
+  for (unsigned i = 0, e = VL.size(); i != e; ++i) {
+    if (MustGather.count(VL[i])) {
+      LLVM_DEBUG(dbgs() << "Revec: Gathering due to gathered scalar.\n");
+      newTreeEntry(VL, false, UserTreeIdx);
+      return;
+    }
+  }
+
+  // Check that all of the users of the scalars that we want to vectorize are
+  // schedulable.
+  auto *VL0 = cast<Instruction>(S.OpValue);
+  BasicBlock *BB = VL0->getParent();
+
+  if (!DT->isReachableFromEntry(BB)) {
+    // Don't go into unreachable blocks. They may contain instructions with
+    // dependency cycles which confuse the final scheduling.
+    LLVM_DEBUG(dbgs() << "Revec: bundle in unreachable block.\n");
     newTreeEntry(VL, false, UserTreeIdx);
     return;
   }
-}
 
-// Check if this is a duplicate of another entry.
-if (TreeEntry *E = getTreeEntry(S.OpValue)) {
-  LLVM_DEBUG(dbgs() << "Revec: \tChecking bundle: " << *S.OpValue << ".\n");
-  if (!E->isSame(VL)) {
-    LLVM_DEBUG(dbgs() << "Revec: Gathering due to partial overlap.\n");
-    newTreeEntry(VL, false, UserTreeIdx);
+  // Check that every instruction appears once in this bundle.
+  SmallVector<unsigned, 4> ReuseShuffleIndices;
+  SmallVector<Value *, 4> UniqueValues;
+  DenseMap<Value *, unsigned> UniquePositions;
+  for (Value *V : VL) {
+    auto Res = UniquePositions.try_emplace(V, UniqueValues.size());
+    ReuseShuffleIndices.emplace_back(Res.first->second);
+    if (Res.second)
+      UniqueValues.emplace_back(V);
+  }
+  if (UniqueValues.size() == VL.size()) {
+    ReuseShuffleIndices.clear();
+  } else {
+    LLVM_DEBUG(dbgs() << "Revec: Shuffle for reused scalars.\n");
+    if (UniqueValues.size() <= 1 || !llvm::isPowerOf2_32(UniqueValues.size())) {
+      LLVM_DEBUG(dbgs() << "Revec: Scalar used twice in bundle.\n");
+      newTreeEntry(VL, false, UserTreeIdx);
+      return;
+    }
+    VL = UniqueValues;
+  }
+
+  auto &BSRef = BlocksSchedules[BB];
+  if (!BSRef)
+    BSRef = llvm::make_unique<BlockScheduling>(BB);
+
+  BlockScheduling &BS = *BSRef.get();
+
+  if (!BS.tryScheduleBundle(VL, this, VL0)) {
+    LLVM_DEBUG(dbgs() << "Revec: We are not able to schedule this bundle!\n");
+    assert((!BS.getScheduleData(VL0) ||
+            !BS.getScheduleData(VL0)->isPartOfBundle()) &&
+            "tryScheduleBundle should cancelScheduling on failure");
+    newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
     return;
   }
-  // Record the reuse of the tree node.  FIXME, currently this is only used to
-  // properly draw the graph rather than for the actual vectorization.
-  E->UserTreeIndices.push_back(UserTreeIdx);
-  LLVM_DEBUG(dbgs() << "Revec: Perfect diamond merge at " << *S.OpValue << ".\n");
-  return;
-}
+  LLVM_DEBUG(dbgs() << "Revec: We are able to schedule this bundle.\n");
 
-// Check that none of the instructions in the bundle are already in the tree.
-for (unsigned i = 0, e = VL.size(); i != e; ++i) {
-  auto *I = dyn_cast<Instruction>(VL[i]);
-  if (!I)
-    continue;
-  if (getTreeEntry(I)) {
-    LLVM_DEBUG(dbgs() << "Revec: The instruction (" << *VL[i] <<
-          ") is already in tree.\n");
-    newTreeEntry(VL, false, UserTreeIdx);
-    return;
-  }
-}
-
-// If any of the narrow vectors is marked as a value that needs to stay narrow, then
-// we need to gather the narrow vectors.
-for (unsigned i = 0, e = VL.size(); i != e; ++i) {
-  if (MustGather.count(VL[i])) {
-    LLVM_DEBUG(dbgs() << "Revec: Gathering due to gathered scalar.\n");
-    newTreeEntry(VL, false, UserTreeIdx);
-    return;
-  }
-}
-
-// Check that all of the users of the scalars that we want to vectorize are
-// schedulable.
-auto *VL0 = cast<Instruction>(S.OpValue);
-BasicBlock *BB = VL0->getParent();
-
-if (!DT->isReachableFromEntry(BB)) {
-  // Don't go into unreachable blocks. They may contain instructions with
-  // dependency cycles which confuse the final scheduling.
-  LLVM_DEBUG(dbgs() << "Revec: bundle in unreachable block.\n");
-  newTreeEntry(VL, false, UserTreeIdx);
-  return;
-}
-
-// Check that every instruction appears once in this bundle.
-SmallVector<unsigned, 4> ReuseShuffleIndices;
-SmallVector<Value *, 4> UniqueValues;
-DenseMap<Value *, unsigned> UniquePositions;
-for (Value *V : VL) {
-  auto Res = UniquePositions.try_emplace(V, UniqueValues.size());
-  ReuseShuffleIndices.emplace_back(Res.first->second);
-  if (Res.second)
-    UniqueValues.emplace_back(V);
-}
-if (UniqueValues.size() == VL.size()) {
-  ReuseShuffleIndices.clear();
-} else {
-  LLVM_DEBUG(dbgs() << "Revec: Shuffle for reused scalars.\n");
-  if (UniqueValues.size() <= 1 || !llvm::isPowerOf2_32(UniqueValues.size())) {
-    LLVM_DEBUG(dbgs() << "Revec: Scalar used twice in bundle.\n");
-    newTreeEntry(VL, false, UserTreeIdx);
-    return;
-  }
-  VL = UniqueValues;
-}
-
-auto &BSRef = BlocksSchedules[BB];
-if (!BSRef)
-  BSRef = llvm::make_unique<BlockScheduling>(BB);
-
-BlockScheduling &BS = *BSRef.get();
-
-if (!BS.tryScheduleBundle(VL, this, VL0)) {
-  LLVM_DEBUG(dbgs() << "Revec: We are not able to schedule this bundle!\n");
-  assert((!BS.getScheduleData(VL0) ||
-          !BS.getScheduleData(VL0)->isPartOfBundle()) &&
-          "tryScheduleBundle should cancelScheduling on failure");
-  newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
-  return;
-}
-LLVM_DEBUG(dbgs() << "Revec: We are able to schedule this bundle.\n");
-
-unsigned ShuffleOrOp = S.IsAltShuffle ?
+  unsigned ShuffleOrOp = S.IsAltShuffle ?
               (unsigned) Instruction::ShuffleVector : S.Opcode;
-switch (ShuffleOrOp) {
-  case Instruction::PHI: {
-    PHINode *PH = dyn_cast<PHINode>(VL0);
+  switch (ShuffleOrOp) {
+    case Instruction::PHI: {
+      PHINode *PH = dyn_cast<PHINode>(VL0);
 
-    // Check for terminator values (e.g. invoke).
-    for (unsigned j = 0; j < VL.size(); ++j)
+      // Check for terminator values (e.g. invoke).
+      for (unsigned j = 0; j < VL.size(); ++j)
+        for (unsigned i = 0, e = PH->getNumIncomingValues(); i < e; ++i) {
+          TerminatorInst *Term = dyn_cast<TerminatorInst>(
+              cast<PHINode>(VL[j])->getIncomingValueForBlock(PH->getIncomingBlock(i)));
+          if (Term) {
+            LLVM_DEBUG(dbgs() << "Revec: Need to swizzle PHINodes (TerminatorInst use).\n");
+            BS.cancelScheduling(VL, VL0);
+            newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
+            return;
+          }
+        }
+
+      newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
+      LLVM_DEBUG(dbgs() << "Revec: added a vector of PHINodes.\n");
+
       for (unsigned i = 0, e = PH->getNumIncomingValues(); i < e; ++i) {
-        TerminatorInst *Term = dyn_cast<TerminatorInst>(
-            cast<PHINode>(VL[j])->getIncomingValueForBlock(PH->getIncomingBlock(i)));
-        if (Term) {
-          LLVM_DEBUG(dbgs() << "Revec: Need to swizzle PHINodes (TerminatorInst use).\n");
+        ValueList Operands;
+        // Prepare the operand vector.
+        for (Value *j : VL)
+          Operands.push_back(cast<PHINode>(j)->getIncomingValueForBlock(
+              PH->getIncomingBlock(i)));
+
+        buildTree_rec(Operands, Depth + 1, UserTreeIdx);
+      }
+      return;
+    }
+    case Instruction::ExtractValue:
+    case Instruction::ExtractElement: {
+      // TODO: Handle ExtractValue instructions?
+      LLVM_DEBUG(dbgs() << "Revec: Cannot create a tree entry with ExtractValue/ExtractElement instructions (scalars).\n");
+      newTreeEntry(VL, false, UserTreeIdx);
+      return;
+    }
+    case Instruction::Load: {
+      // Check that a vectorized load would load the same memory as a scalar
+      // load. For example, we don't want to vectorize loads that are smaller
+      // than 8-bit. Even though we have a packed struct {<i2, i2, i2, i2>} LLVM
+      // treats loading/storing it as an i8 struct. If we vectorize loads/stores
+      // from such a struct, we read/write packed bits disagreeing with the
+      // unvectorized version.
+      Type *ScalarTy = VL0->getType();
+
+      if (DL->getTypeSizeInBits(ScalarTy) !=
+          DL->getTypeAllocSizeInBits(ScalarTy)) {
+        BS.cancelScheduling(VL, VL0);
+        newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
+        LLVM_DEBUG(dbgs() << "Revec: Gathering loads of non-packed type.\n");
+        return;
+      }
+
+      // Make sure all loads in the bundle are simple - we can't vectorize
+      // atomic or volatile loads.
+      for (unsigned i = 0, e = VL.size() - 1; i < e; ++i) {
+        LoadInst *L = cast<LoadInst>(VL[i]);
+        if (!L->isSimple()) {
           BS.cancelScheduling(VL, VL0);
           newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
+          LLVM_DEBUG(dbgs() << "Revec: Gathering non-simple loads.\n");
           return;
         }
       }
 
-    newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
-    LLVM_DEBUG(dbgs() << "Revec: added a vector of PHINodes.\n");
+      // Check if the loads are consecutive, reversed, or neither.
+      // TODO: What we really want is to sort the loads, but for now, check
+      // the two likely directions.
+      bool Consecutive = true;
+      bool ReverseConsecutive = true;
+      for (unsigned i = 0, e = VL.size() - 1; i < e; ++i) {
+        if (!isConsecutiveAccess(VL[i], VL[i + 1], *DL, *SE)) {
+          Consecutive = false;
+          break;
+        } else {
+          ReverseConsecutive = false;
+        }
+      }
 
-    for (unsigned i = 0, e = PH->getNumIncomingValues(); i < e; ++i) {
-      ValueList Operands;
-      // Prepare the operand vector.
-      for (Value *j : VL)
-        Operands.push_back(cast<PHINode>(j)->getIncomingValueForBlock(
-            PH->getIncomingBlock(i)));
+      if (Consecutive) {
+        ++NumOpsWantToKeepOrder[S.Opcode];
+        newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
+        LLVM_DEBUG(dbgs() << "Revec: added a vector of loads.\n");
+        return;
+      }
 
-      buildTree_rec(Operands, Depth + 1, UserTreeIdx);
-    }
-    return;
-  }
-  case Instruction::ExtractValue:
-  case Instruction::ExtractElement: {
-    // TODO: Handle ExtractValue instructions?
-    LLVM_DEBUG(dbgs() << "Revec: Cannot create a tree entry with ExtractValue/ExtractElement instructions (scalars).\n");
-    newTreeEntry(VL, false, UserTreeIdx);
-    return;
-  }
-  case Instruction::Load: {
-    // Check that a vectorized load would load the same memory as a scalar
-    // load. For example, we don't want to vectorize loads that are smaller
-    // than 8-bit. Even though we have a packed struct {<i2, i2, i2, i2>} LLVM
-    // treats loading/storing it as an i8 struct. If we vectorize loads/stores
-    // from such a struct, we read/write packed bits disagreeing with the
-    // unvectorized version.
-    Type *ScalarTy = VL0->getType();
+      // If none of the load pairs were consecutive when checked in order,
+      // check the reverse order.
+      if (ReverseConsecutive)
+        for (unsigned i = VL.size() - 1; i > 0; --i)
+          if (!isConsecutiveAccess(VL[i], VL[i - 1], *DL, *SE)) {
+            ReverseConsecutive = false;
+            break;
+          }
 
-    if (DL->getTypeSizeInBits(ScalarTy) !=
-        DL->getTypeAllocSizeInBits(ScalarTy)) {
+      if (ReverseConsecutive) {
+        --NumOpsWantToKeepOrder[S.Opcode];
+        newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
+        LLVM_DEBUG(dbgs() << "Revec: added a vector of reversed loads.\n");
+        return;
+      }
+
+      LLVM_DEBUG(dbgs() << "Revec: Gathering non-consecutive loads.\n");
       BS.cancelScheduling(VL, VL0);
       newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
-      LLVM_DEBUG(dbgs() << "Revec: Gathering loads of non-packed type.\n");
       return;
     }
-
-    // Make sure all loads in the bundle are simple - we can't vectorize
-    // atomic or volatile loads.
-    for (unsigned i = 0, e = VL.size() - 1; i < e; ++i) {
-      LoadInst *L = cast<LoadInst>(VL[i]);
-      if (!L->isSimple()) {
-        BS.cancelScheduling(VL, VL0);
-        newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
-        LLVM_DEBUG(dbgs() << "Revec: Gathering non-simple loads.\n");
-        return;
-      }
-    }
-
-    // Check if the loads are consecutive, reversed, or neither.
-    // TODO: What we really want is to sort the loads, but for now, check
-    // the two likely directions.
-    bool Consecutive = true;
-    bool ReverseConsecutive = true;
-    for (unsigned i = 0, e = VL.size() - 1; i < e; ++i) {
-      if (!isConsecutiveAccess(VL[i], VL[i + 1], *DL, *SE)) {
-        Consecutive = false;
-        break;
-      } else {
-        ReverseConsecutive = false;
-      }
-    }
-
-    if (Consecutive) {
-      ++NumOpsWantToKeepOrder[S.Opcode];
-      newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
-      LLVM_DEBUG(dbgs() << "Revec: added a vector of loads.\n");
-      return;
-    }
-
-    // If none of the load pairs were consecutive when checked in order,
-    // check the reverse order.
-    if (ReverseConsecutive)
-      for (unsigned i = VL.size() - 1; i > 0; --i)
-        if (!isConsecutiveAccess(VL[i], VL[i - 1], *DL, *SE)) {
-          ReverseConsecutive = false;
-          break;
+    case Instruction::ZExt:
+    case Instruction::SExt:
+    case Instruction::FPToUI:
+    case Instruction::FPToSI:
+    case Instruction::FPExt:
+    case Instruction::PtrToInt:
+    case Instruction::IntToPtr:
+    case Instruction::SIToFP:
+    case Instruction::UIToFP:
+    case Instruction::Trunc:
+    case Instruction::FPTrunc:
+    case Instruction::BitCast: {
+      Type *SrcTy = VL0->getOperand(0)->getType();
+      for (unsigned i = 0; i < VL.size(); ++i) {
+        Type *Ty = cast<Instruction>(VL[i])->getOperand(0)->getType();
+        if (Ty != SrcTy || !isValidElementType(Ty)) {
+          BS.cancelScheduling(VL, VL0);
+          newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
+          LLVM_DEBUG(dbgs() << "Revec: Gathering casts with different src types.\n");
+          return;
         }
-
-    if (ReverseConsecutive) {
-      --NumOpsWantToKeepOrder[S.Opcode];
+      }
       newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
-      LLVM_DEBUG(dbgs() << "Revec: added a vector of reversed loads.\n");
+      LLVM_DEBUG(dbgs() << "Revec: added a vector of casts.\n");
+
+      for (unsigned i = 0, e = VL0->getNumOperands(); i < e; ++i) {
+        ValueList Operands;
+        // Prepare the operand vector.
+        for (Value *j : VL)
+          Operands.push_back(cast<Instruction>(j)->getOperand(i));
+
+        buildTree_rec(Operands, Depth + 1, UserTreeIdx);
+      }
       return;
     }
-
-    LLVM_DEBUG(dbgs() << "Revec: Gathering non-consecutive loads.\n");
-    BS.cancelScheduling(VL, VL0);
-    newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
-    return;
-  }
-  case Instruction::ZExt:
-  case Instruction::SExt:
-  case Instruction::FPToUI:
-  case Instruction::FPToSI:
-  case Instruction::FPExt:
-  case Instruction::PtrToInt:
-  case Instruction::IntToPtr:
-  case Instruction::SIToFP:
-  case Instruction::UIToFP:
-  case Instruction::Trunc:
-  case Instruction::FPTrunc:
-  case Instruction::BitCast: {
-    Type *SrcTy = VL0->getOperand(0)->getType();
-    for (unsigned i = 0; i < VL.size(); ++i) {
-      Type *Ty = cast<Instruction>(VL[i])->getOperand(0)->getType();
-      if (Ty != SrcTy || !isValidElementType(Ty)) {
-        BS.cancelScheduling(VL, VL0);
-        newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
-        LLVM_DEBUG(dbgs() << "Revec: Gathering casts with different src types.\n");
-        return;
-      }
-    }
-    newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
-    LLVM_DEBUG(dbgs() << "Revec: added a vector of casts.\n");
-
-    for (unsigned i = 0, e = VL0->getNumOperands(); i < e; ++i) {
-      ValueList Operands;
-      // Prepare the operand vector.
-      for (Value *j : VL)
-        Operands.push_back(cast<Instruction>(j)->getOperand(i));
-
-      buildTree_rec(Operands, Depth + 1, UserTreeIdx);
-    }
-    return;
-  }
-  case Instruction::ICmp:
-  case Instruction::FCmp: {
-    // Check that all of the compares have the same predicate.
-    CmpInst::Predicate P0 = cast<CmpInst>(VL0)->getPredicate();
-    Type *ComparedTy = VL0->getOperand(0)->getType();
-    for (unsigned i = 1, e = VL.size(); i < e; ++i) {
-      CmpInst *Cmp = cast<CmpInst>(VL[i]);
-      if (Cmp->getPredicate() != P0 ||
-          Cmp->getOperand(0)->getType() != ComparedTy) {
-        BS.cancelScheduling(VL, VL0);
-        newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
-        LLVM_DEBUG(dbgs() << "Revec: Gathering cmp with different predicate.\n");
-        return;
-      }
-    }
-
-    newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
-    LLVM_DEBUG(dbgs() << "Revec: added a vector of compares.\n");
-
-    for (unsigned i = 0, e = VL0->getNumOperands(); i < e; ++i) {
-      ValueList Operands;
-      // Prepare the operand vector.
-      for (Value *j : VL)
-        Operands.push_back(cast<Instruction>(j)->getOperand(i));
-
-      buildTree_rec(Operands, Depth + 1, UserTreeIdx);
-    }
-    return;
-  }
-  case Instruction::Select:
-  case Instruction::Add:
-  case Instruction::FAdd:
-  case Instruction::Sub:
-  case Instruction::FSub:
-  case Instruction::Mul:
-  case Instruction::FMul:
-  case Instruction::UDiv:
-  case Instruction::SDiv:
-  case Instruction::FDiv:
-  case Instruction::URem:
-  case Instruction::SRem:
-  case Instruction::FRem:
-  case Instruction::Shl:
-  case Instruction::LShr:
-  case Instruction::AShr:
-  case Instruction::And:
-  case Instruction::Or:
-  case Instruction::Xor:
-    newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
-    LLVM_DEBUG(dbgs() << "Revec: added a vector of bin op.\n");
-
-    // Sort operands of the instructions so that each side is more likely to
-    // have the same opcode.
-    if (isa<BinaryOperator>(VL0) && VL0->isCommutative()) {
-      // Note: Compares may commute if the operation is changed
-      //       E.g. flip true/false values by flipping the operation (> to <)
-      //       However, this would create different operations in a bundle that
-      //       cannot be vectorized.
-      ValueList Left, Right;
-      reorderInputsAccordingToOpcode(S.Opcode, VL, Left, Right);
-      buildTree_rec(Left, Depth + 1, UserTreeIdx);
-      buildTree_rec(Right, Depth + 1, UserTreeIdx);
-      return;
-    }
-
-    for (unsigned i = 0, e = VL0->getNumOperands(); i < e; ++i) {
-      ValueList Operands;
-      // Prepare the operand vector.
-      for (Value *j : VL)
-        Operands.push_back(cast<Instruction>(j)->getOperand(i));
-
-      buildTree_rec(Operands, Depth + 1, UserTreeIdx);
-    }
-    return;
-
-  case Instruction::GetElementPtr: {
-    // We don't combine GEPs with complicated (nested) indexing.
-    for (unsigned j = 0; j < VL.size(); ++j) {
-      if (cast<Instruction>(VL[j])->getNumOperands() != 2) {
-        LLVM_DEBUG(dbgs() << "Revec: not-vectorizable GEP (nested indexes).\n");
-        BS.cancelScheduling(VL, VL0);
-        newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
-        return;
-      }
-    }
-
-    // We can't combine several GEPs into one vector if they operate on
-    // different types.
-    Type *Ty0 = VL0->getOperand(0)->getType();
-    for (unsigned j = 0; j < VL.size(); ++j) {
-      Type *CurTy = cast<Instruction>(VL[j])->getOperand(0)->getType();
-      if (Ty0 != CurTy) {
-        LLVM_DEBUG(dbgs() << "Revec: not-vectorizable GEP (different types).\n");
-        BS.cancelScheduling(VL, VL0);
-        newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
-        return;
-      }
-    }
-
-    // We don't combine GEPs with non-constant indexes.
-    for (unsigned j = 0; j < VL.size(); ++j) {
-      auto Op = cast<Instruction>(VL[j])->getOperand(1);
-      if (!isa<ConstantInt>(Op)) {
-        LLVM_DEBUG(
-            dbgs() << "Revec: not-vectorizable GEP (non-constant indexes).\n");
-        BS.cancelScheduling(VL, VL0);
-        newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
-        return;
-      }
-    }
-
-    newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
-    LLVM_DEBUG(dbgs() << "Revec: added a vector of GEPs.\n");
-    for (unsigned i = 0, e = 2; i < e; ++i) {
-      ValueList Operands;
-      // Prepare the operand vector.
-      for (Value *j : VL)
-        Operands.push_back(cast<Instruction>(j)->getOperand(i));
-
-      buildTree_rec(Operands, Depth + 1, UserTreeIdx);
-    }
-    return;
-  }
-  case Instruction::Store: {
-    // Check if the stores are consecutive or of we need to swizzle them.
-    for (unsigned i = 0, e = VL.size() - 1; i < e; ++i)
-      if (!isConsecutiveAccess(VL[i], VL[i + 1], *DL, *SE)) {
-        BS.cancelScheduling(VL, VL0);
-        newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
-        LLVM_DEBUG(dbgs() << "Revec: Non-consecutive store.\n");
-        return;
-      }
-
-    newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
-    LLVM_DEBUG(dbgs() << "Revec: added a vector of stores.\n");
-
-    ValueList Operands;
-    for (Value *j : VL)
-      Operands.push_back(cast<Instruction>(j)->getOperand(0));
-
-    buildTree_rec(Operands, Depth + 1, UserTreeIdx);
-    return;
-  }
-  case Instruction::Call: {
-    // Check if the calls are all to the same vectorizable intrinsic.
-    CallInst *CI = cast<CallInst>(VL0);
-
-    Intrinsic::ID IID = getIntrinsicByCall(CI);
-
-    if (IID != Intrinsic::not_intrinsic) {
-      if (llvm::Intrinsic::isOverloaded(IID))
-				// TODO: Use other implementation of getName
-				LLVM_DEBUG(dbgs() << "Revec: Found intrinsic function overloading: " << IID << "\n");
-			else
-				LLVM_DEBUG(dbgs() << "Revec: Found intrinsic function " << IID << ", " << llvm::Intrinsic::getName(IID) << "\n");
-
-      // Find intrinsic conversion and merge factor
-      const auto& target = getWidenedIntrinsic(IID, VL.size());
-      int VF = target.first;
-      Intrinsic::ID alt = target.second;
-
-      if (alt != Intrinsic::not_intrinsic && VF > 0) {
-        assert(VF == static_cast<long>(VL.size()) && "getWidenedIntrinsic returned a VF not requested");
-
-				if (llvm::Intrinsic::isOverloaded(alt))
-					LLVM_DEBUG(dbgs() << "Revec:   possible conversion (overloading): " << alt
-									<< " widening factor: " << VF << ".\n");
-				else
-					LLVM_DEBUG(dbgs() << "Revec:   possible conversion: " << llvm::Intrinsic::getName(alt)
-									<< " widening factor: " << VF << ".\n");
-
-        newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
-
-        for (unsigned i = 0, e = CI->getNumArgOperands(); i != e; ++i) {
-          ValueList Operands;
-          // Prepare the operand vector.
-          for (Value *val : VL) {
-            CallInst *CI2 = dyn_cast<CallInst>(val);
-            Operands.push_back(CI2->getArgOperand(i));
-          }
-          buildTree_rec(Operands, Depth + 1, UserTreeIdx);
+    case Instruction::ICmp:
+    case Instruction::FCmp: {
+      // Check that all of the compares have the same predicate.
+      CmpInst::Predicate P0 = cast<CmpInst>(VL0)->getPredicate();
+      Type *ComparedTy = VL0->getOperand(0)->getType();
+      for (unsigned i = 1, e = VL.size(); i < e; ++i) {
+        CmpInst *Cmp = cast<CmpInst>(VL[i]);
+        if (Cmp->getPredicate() != P0 ||
+            Cmp->getOperand(0)->getType() != ComparedTy) {
+          BS.cancelScheduling(VL, VL0);
+          newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
+          LLVM_DEBUG(dbgs() << "Revec: Gathering cmp with different predicate.\n");
+          return;
         }
-
-        return;
-      } else {
-        // TODO: emit an optimization missed remark
-        LLVM_DEBUG(dbgs()
-            << "Revec:   no conversion found.\n"
-            << "Revec:     First narrow call: " << *CI << "\n"
-            << "Revec:     Narrow key: " << static_cast<unsigned>(IID));
-				if (!llvm::Intrinsic::isOverloaded(IID))
-					LLVM_DEBUG(dbgs() << " name: " << llvm::Intrinsic::getName(IID) << "\n");
-				else
-					LLVM_DEBUG(dbgs() << " (overloading)\n");
       }
-    }
 
-    // Found a non-intrinsic call or intrinsic cannot be widened
-    // Cancel scheduling this tree
-    BS.cancelScheduling(VL, VL0);
-    newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
-    return;
-  }
-  case Instruction::ShuffleVector: {
-    LLVM_DEBUG(dbgs() << "Revec: buldTree encountered shufflevector bundle starting with " << *VL0 << "\n");
-
-    if (S.IsAltShuffle) {
-      // This is actually a bundle of binary operations that require a shuffle to be
-      // merged together
       newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
-      LLVM_DEBUG(dbgs() << "Revec: added a ShuffleVector op for alt shuffle.\n");
+      LLVM_DEBUG(dbgs() << "Revec: added a vector of compares.\n");
 
-      // Reorder operands if reordering would enable vectorization.
-      if (isa<BinaryOperator>(VL0)) {
+      for (unsigned i = 0, e = VL0->getNumOperands(); i < e; ++i) {
+        ValueList Operands;
+        // Prepare the operand vector.
+        for (Value *j : VL)
+          Operands.push_back(cast<Instruction>(j)->getOperand(i));
+
+        buildTree_rec(Operands, Depth + 1, UserTreeIdx);
+      }
+      return;
+    }
+    case Instruction::Select:
+    case Instruction::Add:
+    case Instruction::FAdd:
+    case Instruction::Sub:
+    case Instruction::FSub:
+    case Instruction::Mul:
+    case Instruction::FMul:
+    case Instruction::UDiv:
+    case Instruction::SDiv:
+    case Instruction::FDiv:
+    case Instruction::URem:
+    case Instruction::SRem:
+    case Instruction::FRem:
+    case Instruction::Shl:
+    case Instruction::LShr:
+    case Instruction::AShr:
+    case Instruction::And:
+    case Instruction::Or:
+    case Instruction::Xor:
+      newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
+      LLVM_DEBUG(dbgs() << "Revec: added a vector of bin op.\n");
+
+      // Sort operands of the instructions so that each side is more likely to
+      // have the same opcode.
+      if (isa<BinaryOperator>(VL0) && VL0->isCommutative()) {
+        // Note: Compares may commute if the operation is changed
+        //       E.g. flip true/false values by flipping the operation (> to <)
+        //       However, this would create different operations in a bundle that
+        //       cannot be vectorized.
         ValueList Left, Right;
-        reorderAltShuffleOperands(S.Opcode, VL, Left, Right);
+        reorderInputsAccordingToOpcode(S.Opcode, VL, Left, Right);
         buildTree_rec(Left, Depth + 1, UserTreeIdx);
         buildTree_rec(Right, Depth + 1, UserTreeIdx);
         return;
@@ -2368,107 +2212,263 @@ switch (ShuffleOrOp) {
         buildTree_rec(Operands, Depth + 1, UserTreeIdx);
       }
       return;
+
+    case Instruction::GetElementPtr: {
+      // We don't combine GEPs with complicated (nested) indexing.
+      for (unsigned j = 0; j < VL.size(); ++j) {
+        if (cast<Instruction>(VL[j])->getNumOperands() != 2) {
+          LLVM_DEBUG(dbgs() << "Revec: not-vectorizable GEP (nested indexes).\n");
+          BS.cancelScheduling(VL, VL0);
+          newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
+          return;
+        }
+      }
+
+      // We can't combine several GEPs into one vector if they operate on
+      // different types.
+      Type *Ty0 = VL0->getOperand(0)->getType();
+      for (unsigned j = 0; j < VL.size(); ++j) {
+        Type *CurTy = cast<Instruction>(VL[j])->getOperand(0)->getType();
+        if (Ty0 != CurTy) {
+          LLVM_DEBUG(dbgs() << "Revec: not-vectorizable GEP (different types).\n");
+          BS.cancelScheduling(VL, VL0);
+          newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
+          return;
+        }
+      }
+
+      // We don't combine GEPs with non-constant indexes.
+      for (unsigned j = 0; j < VL.size(); ++j) {
+        auto Op = cast<Instruction>(VL[j])->getOperand(1);
+        if (!isa<ConstantInt>(Op)) {
+          LLVM_DEBUG(
+              dbgs() << "Revec: not-vectorizable GEP (non-constant indexes).\n");
+          BS.cancelScheduling(VL, VL0);
+          newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
+          return;
+        }
+      }
+
+      newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
+      LLVM_DEBUG(dbgs() << "Revec: added a vector of GEPs.\n");
+      for (unsigned i = 0, e = 2; i < e; ++i) {
+        ValueList Operands;
+        // Prepare the operand vector.
+        for (Value *j : VL)
+          Operands.push_back(cast<Instruction>(j)->getOperand(i));
+
+        buildTree_rec(Operands, Depth + 1, UserTreeIdx);
+      }
+      return;
     }
-
-    // Check for special cases with an optimal vectorization decision
-    ValueList Left, Right;
-    SmallVector<Constant *, 8U> Masks;
-    for (Value *V : VL) {
-      ShuffleVectorInst *I = cast<ShuffleVectorInst>(V);
-      Left.push_back(I->getOperand(0));
-      Right.push_back(I->getOperand(1));
-      Masks.push_back(I->getMask());
-    }
-
-    if (isSplat(Left)) {
-      if (isSplat(Right)) {
-        if (dyn_cast<UndefValue>(Right[0]) != nullptr) {
-          // Check for case:
-          // a1 = sv A, undef, <0, 1, 2, ..., 7>
-          // a2 = sv A, undef, <8, 9, 10, ..., 15>
-          //   =>
-          // A
-          unsigned expected_mask_value = 0;
-          bool isSequentialMask = true;
-          for (Constant * mask : Masks) {
-            LLVM_DEBUG(dbgs() << "Revec: Checking mask " << *mask << " for sequentiality\n");
-
-            for (unsigned i = 0; i < mask->getType()->getVectorNumElements(); ++i) {
-              Value *Opi = mask->getAggregateElement(i);
-              ConstantInt *CI = dyn_cast<ConstantInt>(Opi);
-              LLVM_DEBUG(dbgs() << "Revec:   Mask operand at index " << i << " = " << *Opi << ". Testing if equal to " << expected_mask_value << "\n");
-              if (CI == nullptr || !CI->equalsInt(expected_mask_value)) {
-                LLVM_DEBUG(dbgs() << "Revec:     Not equal! Mask is not sequential.\n");
-                isSequentialMask = false;
-                break;
-              }
-
-              LLVM_DEBUG(dbgs() << "Revec:     Equal. Mask may be sequential.\n");
-
-              ++expected_mask_value;
-            }
-          }
-
-          if (isSequentialMask) {
-            // TODO: Remove dummyIndices
-            OperandIndices dummyIndices;
-            ShuffleCache.emplace_back(VL, ShuffleBundleDecision::FirstOp0, dummyIndices, nullptr);
-            newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
-            LLVM_DEBUG(dbgs() << "Revec: added a ShuffleVector op for mode FirstOp0\n");
-            return;
-          }
+    case Instruction::Store: {
+      // Check if the stores are consecutive or of we need to swizzle them.
+      for (unsigned i = 0, e = VL.size() - 1; i < e; ++i)
+        if (!isConsecutiveAccess(VL[i], VL[i + 1], *DL, *SE)) {
+          BS.cancelScheduling(VL, VL0);
+          newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
+          LLVM_DEBUG(dbgs() << "Revec: Non-consecutive store.\n");
+          return;
         }
 
-        // Left and right can be trivially merged by taking operands of VL[0]
-        // The masks will be concatenated
-        OperandIndices dummyIndices;
-        ShuffleCache.emplace_back(VL, ShuffleBundleDecision::FirstOp0_FirstOp1_ConcatenateMask, dummyIndices, nullptr);
-        newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
-        LLVM_DEBUG(dbgs() << "Revec: added a ShuffleVector op for mode FirstOp0_FirstOp1_ConcatenateMask.\n");
-        return;
-      }
+      newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
+      LLVM_DEBUG(dbgs() << "Revec: added a vector of stores.\n");
 
-      Constant *MergedOp1 = mergeIfConstantVectors(Right);
-      if (MergedOp1 != nullptr) {
-        // Left is merged by taking operand 0 from VL[0]
-        // Right is merged by taking non-undefined elements from each lane
-        OperandIndices dummyIndices;
-        ShuffleCache.emplace_back(VL, ShuffleBundleDecision::FirstOp0_MergeOp1_ConcatenateMask, dummyIndices, MergedOp1);
-        newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
-        LLVM_DEBUG(dbgs() << "Revec: added a ShuffleVector op for mode "
-                              "FirstOp0_MergeOp1_ConcatentateMask.\n");
-        LLVM_DEBUG(dbgs() << "Revec:   MergedOp1: " << *(ShuffleCache.back().Op1Value) << "\n");
-        LLVM_DEBUG(dbgs() << "Revec:   Mask: " << *(ShuffleCache.back().Mask) << "\n");
-        return;
-      }
+      ValueList Operands;
+      for (Value *j : VL)
+        Operands.push_back(cast<Instruction>(j)->getOperand(0));
+
+      buildTree_rec(Operands, Depth + 1, UserTreeIdx);
+      return;
     }
+    case Instruction::Call: {
+      // Check if the calls are all to the same vectorizable intrinsic.
+      CallInst *CI = cast<CallInst>(VL0);
 
-#if 0
-    // TODO: Add getEntryCost and vectorizeTree code for this special case
-    if (allConstant(Right) && VL.size() == 4) {
-      if (Left[0] == Left[1] && Left[2] == Left[3]) {
-        SmallVector<Value *, 2> Op1_01, Op1_23;
-        Op1_01.push_back(Right[0]);
-        Op1_01.push_back(Right[1]);
-        Op1_23.push_back(Right[2]);
-        Op1_23.push_back(Right[3]);
+      Intrinsic::ID IID = getIntrinsicByCall(CI);
 
-        Constant *MergedOp1VL01 = mergeIfConstantVectors(Op1_01);
-        Constant *MergedOp1VL23 = mergeIfConstantVectors(Op1_23);
+      if (IID != Intrinsic::not_intrinsic) {
+        if (llvm::Intrinsic::isOverloaded(IID))
+          // TODO: Use other implementation of getName
+          LLVM_DEBUG(dbgs() << "Revec: Found intrinsic function overloading: " << IID << "\n");
+        else
+          LLVM_DEBUG(dbgs() << "Revec: Found intrinsic function " << IID << ", " << llvm::Intrinsic::getName(IID) << "\n");
 
-        if (MergedOp1VL01 && MergedOp1VL23) {
-          Constant *MergedOp1 = concatenateTwoConstantVectors(MergedOp1VL01, MergedOp1VL23);
+        // Find intrinsic conversion and merge factor
+        const auto& target = getWidenedIntrinsic(IID, VL.size());
+        int VF = target.first;
+        Intrinsic::ID alt = target.second;
 
-          if (MergedOp1) {
-            OperandIndices dummyIndices;
-            ShuffleCache.emplace_back(VL, ShuffleBundleDecision::FirstThirdOp0_DoubleMergeOp1, dummyIndices, MergedOp1);
+        if (alt != Intrinsic::not_intrinsic && VF > 0) {
+          assert(VF == static_cast<long>(VL.size()) && "getWidenedIntrinsic returned a VF not requested");
+
+          if (llvm::Intrinsic::isOverloaded(alt))
+            LLVM_DEBUG(dbgs() << "Revec:   possible conversion (overloading): " << alt
+                    << " widening factor: " << VF << ".\n");
+          else
+            LLVM_DEBUG(dbgs() << "Revec:   possible conversion: " << llvm::Intrinsic::getName(alt)
+                    << " widening factor: " << VF << ".\n");
+
+          newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
+
+          for (unsigned i = 0, e = CI->getNumArgOperands(); i != e; ++i) {
+            ValueList Operands;
+            // Prepare the operand vector.
+            for (Value *val : VL) {
+              CallInst *CI2 = dyn_cast<CallInst>(val);
+              Operands.push_back(CI2->getArgOperand(i));
+            }
+            buildTree_rec(Operands, Depth + 1, UserTreeIdx);
+          }
+
+          return;
+        } else {
+          // TODO: emit an optimization missed remark
+          LLVM_DEBUG(dbgs()
+              << "Revec:   no conversion found.\n"
+              << "Revec:     First narrow call: " << *CI << "\n"
+              << "Revec:     Narrow key: " << static_cast<unsigned>(IID));
+          if (!llvm::Intrinsic::isOverloaded(IID))
+            LLVM_DEBUG(dbgs() << " name: " << llvm::Intrinsic::getName(IID) << "\n");
+          else
+            LLVM_DEBUG(dbgs() << " (overloading)\n");
+        }
+      }
+
+      // Found a non-intrinsic call or intrinsic cannot be widened
+      // Cancel scheduling this tree
+      BS.cancelScheduling(VL, VL0);
+      newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
+      return;
+    }
+    case Instruction::ShuffleVector: {
+      LLVM_DEBUG(dbgs() << "Revec: buldTree encountered shufflevector bundle starting with " << *VL0 << "\n");
+
+      if (S.IsAltShuffle) {
+        // This is actually a bundle of binary operations that require a shuffle to be
+        // merged together
+        newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
+        LLVM_DEBUG(dbgs() << "Revec: added a ShuffleVector op for alt shuffle.\n");
+
+        // Reorder operands if reordering would enable vectorization.
+        if (isa<BinaryOperator>(VL0)) {
+          ValueList Left, Right;
+          reorderAltShuffleOperands(S.Opcode, VL, Left, Right);
+          buildTree_rec(Left, Depth + 1, UserTreeIdx);
+          buildTree_rec(Right, Depth + 1, UserTreeIdx);
+          return;
+        }
+
+        for (unsigned i = 0, e = VL0->getNumOperands(); i < e; ++i) {
+          ValueList Operands;
+          // Prepare the operand vector.
+          for (Value *j : VL)
+            Operands.push_back(cast<Instruction>(j)->getOperand(i));
+
+          buildTree_rec(Operands, Depth + 1, UserTreeIdx);
+        }
+        return;
+      }
+
+      // Check for special cases with an optimal vectorization decision
+      ValueList Left, Right;
+      SmallVector<Constant *, 8U> Masks;
+      for (Value *V : VL) {
+        ShuffleVectorInst *I = cast<ShuffleVectorInst>(V);
+        Left.push_back(I->getOperand(0));
+        Right.push_back(I->getOperand(1));
+        Masks.push_back(I->getMask());
+      }
+
+      if (isSplat(Left)) {
+        if (isSplat(Right)) {
+          if (dyn_cast<UndefValue>(Right[0]) != nullptr) {
+            // Check for case:
+            // a1 = sv A, undef, <0, 1, 2, ..., 7>
+            // a2 = sv A, undef, <8, 9, 10, ..., 15>
+            //   =>
+            // A
+            unsigned expected_mask_value = 0;
+            bool isSequentialMask = true;
+            for (Constant * mask : Masks) {
+              LLVM_DEBUG(dbgs() << "Revec: Checking mask " << *mask << " for sequentiality\n");
+
+              for (unsigned i = 0; i < mask->getType()->getVectorNumElements(); ++i) {
+                Value *Opi = mask->getAggregateElement(i);
+                ConstantInt *CI = dyn_cast<ConstantInt>(Opi);
+                LLVM_DEBUG(dbgs() << "Revec:   Mask operand at index " << i << " = " << *Opi << ". Testing if equal to " << expected_mask_value << "\n");
+                if (CI == nullptr || !CI->equalsInt(expected_mask_value)) {
+                  LLVM_DEBUG(dbgs() << "Revec:     Not equal! Mask is not sequential.\n");
+                  isSequentialMask = false;
+                  break;
+                }
+
+                LLVM_DEBUG(dbgs() << "Revec:     Equal. Mask may be sequential.\n");
+
+                ++expected_mask_value;
+              }
+            }
+
+            if (isSequentialMask) {
+              // TODO: Remove dummyIndices
+              OperandIndices dummyIndices;
+              ShuffleCache.emplace_back(VL, ShuffleBundleDecision::FirstOp0, dummyIndices, nullptr);
               newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
-              LLVM_DEBUG(dbgs() << "Revec: added a ShuffleVector op for mode FirstThirdOp0_DoubleMergeOp1.\n");
+              LLVM_DEBUG(dbgs() << "Revec: added a ShuffleVector op for mode FirstOp0\n");
               return;
             }
           }
+
+          // Left and right can be trivially merged by taking operands of VL[0]
+          // The masks will be concatenated
+          OperandIndices dummyIndices;
+          ShuffleCache.emplace_back(VL, ShuffleBundleDecision::FirstOp0_FirstOp1_ConcatenateMask, dummyIndices, nullptr);
+          newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
+          LLVM_DEBUG(dbgs() << "Revec: added a ShuffleVector op for mode FirstOp0_FirstOp1_ConcatenateMask.\n");
+          return;
+        }
+
+        Constant *MergedOp1 = mergeIfConstantVectors(Right);
+        if (MergedOp1 != nullptr) {
+          // Left is merged by taking operand 0 from VL[0]
+          // Right is merged by taking non-undefined elements from each lane
+          OperandIndices dummyIndices;
+          ShuffleCache.emplace_back(VL, ShuffleBundleDecision::FirstOp0_MergeOp1_ConcatenateMask, dummyIndices, MergedOp1);
+          newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
+          LLVM_DEBUG(dbgs() << "Revec: added a ShuffleVector op for mode "
+                                "FirstOp0_MergeOp1_ConcatentateMask.\n");
+          LLVM_DEBUG(dbgs() << "Revec:   MergedOp1: " << *(ShuffleCache.back().Op1Value) << "\n");
+          LLVM_DEBUG(dbgs() << "Revec:   Mask: " << *(ShuffleCache.back().Mask) << "\n");
+          return;
         }
       }
+
+#if 0
+      // TODO: Add getEntryCost and vectorizeTree code for this special case
+      if (allConstant(Right) && VL.size() == 4) {
+        if (Left[0] == Left[1] && Left[2] == Left[3]) {
+          SmallVector<Value *, 2> Op1_01, Op1_23;
+          Op1_01.push_back(Right[0]);
+          Op1_01.push_back(Right[1]);
+          Op1_23.push_back(Right[2]);
+          Op1_23.push_back(Right[3]);
+
+          Constant *MergedOp1VL01 = mergeIfConstantVectors(Op1_01);
+          Constant *MergedOp1VL23 = mergeIfConstantVectors(Op1_23);
+
+          if (MergedOp1VL01 && MergedOp1VL23) {
+            Constant *MergedOp1 = concatenateTwoConstantVectors(MergedOp1VL01, MergedOp1VL23);
+
+            if (MergedOp1) {
+              OperandIndices dummyIndices;
+              ShuffleCache.emplace_back(VL, ShuffleBundleDecision::FirstThirdOp0_DoubleMergeOp1, dummyIndices, MergedOp1);
+                newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
+                LLVM_DEBUG(dbgs() << "Revec: added a ShuffleVector op for mode FirstThirdOp0_DoubleMergeOp1.\n");
+                return;
+              }
+            }
+          }
+        }
 #endif
 
       if (allConstant(Right) || allConstant(Left) || isSplat(Masks)) {
@@ -2497,26 +2497,26 @@ switch (ShuffleOrOp) {
         return;
       }
 
-			if (VL.size() == 2) {
-				Left.clear();
-				Right.clear();
+      if (VL.size() == 2) {
+      	Left.clear();
+      	Right.clear();
 
-				ShuffleVectorInst *I = cast<ShuffleVectorInst>(VL[0]);
-				Left.push_back(I->getOperand(0));
-				Right.push_back(I->getOperand(1));
+      	ShuffleVectorInst *I = cast<ShuffleVectorInst>(VL[0]);
+      	Left.push_back(I->getOperand(0));
+      	Right.push_back(I->getOperand(1));
 
-				I = cast<ShuffleVectorInst>(VL[1]);
-				Left.push_back(I->getOperand(1));
-				Right.push_back(I->getOperand(0));
+      	I = cast<ShuffleVectorInst>(VL[1]);
+      	Left.push_back(I->getOperand(1));
+      	Right.push_back(I->getOperand(0));
 
-				if (isSplat(Left) && isSplat(Right)) {
-					OperandIndices dummyIndices;
-					ShuffleCache.emplace_back(VL, ShuffleBundleDecision::Diagonal_VF2, dummyIndices, nullptr);
-					newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
-					LLVM_DEBUG(dbgs() << "Revec: added a ShuffleVector op for mode Diagonal_VF2.\n");
-					return;
-				}
-			}
+      	if (isSplat(Left) && isSplat(Right)) {
+      		OperandIndices dummyIndices;
+      		ShuffleCache.emplace_back(VL, ShuffleBundleDecision::Diagonal_VF2, dummyIndices, nullptr);
+      		newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
+      		LLVM_DEBUG(dbgs() << "Revec: added a ShuffleVector op for mode Diagonal_VF2.\n");
+      		return;
+      	}
+      }
 
       // Default to a gather if we haven't encountered a special case.
       // TODO: Search recursively for optimal bundle indexes, with backtracking
