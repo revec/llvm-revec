@@ -2004,6 +2004,9 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
           TerminatorInst *Term = dyn_cast<TerminatorInst>(
               cast<PHINode>(VL[j])->getIncomingValueForBlock(PH->getIncomingBlock(i)));
           if (Term) {
+            // Gather PHINodes where an incoming value is the result of an invoke.
+            // We would rather gather the Phi than handle incoming values differently (invokes would
+            // need to be gathered regardless)
             LLVM_DEBUG(dbgs() << "Revec: Need to swizzle PHINodes (TerminatorInst use).\n");
             BS.cancelScheduling(VL, VL0);
             newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
@@ -4416,6 +4419,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
                            ? FirstInst->getOperand(1) // Simply use the first shuffle's operand 1
                            : decision.Op1Value; // The merged operand 1 was precomputed in buildTree_rec
 
+          setInsertPointAfterBundle(E->Scalars, VL0);
           V = Builder.CreateShuffleVector(Op0, Op1, decision.Mask);
           break;
         }
@@ -4426,6 +4430,8 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
           ShuffleVectorInst *FirstInst = cast<ShuffleVectorInst>(E->Scalars[0]);
           Value *Op0 = FirstInst->getOperand(0);
           Value *Op1 = FirstInst->getOperand(1);
+
+          setInsertPointAfterBundle(E->Scalars, VL0);
           V = Builder.CreateShuffleVector(Op0, Op1, decision.Mask);
           break;
         }
@@ -5406,6 +5412,7 @@ bool RevectorizerPass::runImpl(Function &F, ScalarEvolution *SE_,
     return false;
   }
 
+  LLVM_DEBUG(dbgs() << "\n================================\n");
   LLVM_DEBUG(dbgs() << "Revec: Analyzing blocks in " << F.getName() << ".\n");
   LLVM_DEBUG(dbgs() << "Revec: Function IR:\n");
   LLVM_DEBUG(dbgs() << F << "\n");
@@ -5433,7 +5440,9 @@ bool RevectorizerPass::runImpl(Function &F, ScalarEvolution *SE_,
 
   if (Changed) {
     R.optimizeGatherSequence();
-    LLVM_DEBUG(dbgs() << "Revec: vectorized \"" << F.getName() << "\"\n");
+    LLVM_DEBUG(dbgs() << "Revec: revectorized \"" << F.getName() << "\"\n");
+    LLVM_DEBUG(dbgs() << "Revec: revectorized Function IR:\n");
+    LLVM_DEBUG(dbgs() << F << "\n\n");
     LLVM_DEBUG(verifyFunction(F));
   }
 
