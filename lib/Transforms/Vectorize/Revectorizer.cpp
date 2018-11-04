@@ -5436,6 +5436,10 @@ bool RevectorizerPass::runImpl(Function &F, ScalarEvolution *SE_,
                    << " underlying objects.\n");
       Changed |= vectorizeStoreChains(R);
     }
+
+    // Vectorize trees that end at reductions.
+    Changed |= vectorizeChainsInBlock(BB, R);
+
   }
 
   if (Changed) {
@@ -5699,6 +5703,142 @@ bool RevectorizerPass::vectorizeStoreChains(BoUpSLP &R) {
 #endif
   return Changed;
 }
+
+
+// reductions related functions
+bool RevectorizerPass::vectorizeChainsInBlock(BasicBlock *BB, BoUpSLP &R) {
+  bool Changed = false;
+  SmallVector<Value *, 4> Incoming;
+  SmallPtrSet<Value *, 16> VisitedInstrs;
+
+  bool HaveVectorizedPhiNodes = true;
+  while (HaveVectorizedPhiNodes) {
+    HaveVectorizedPhiNodes = false;
+
+    // Collect the incoming values from the PHIs.
+    Incoming.clear();
+    for (Instruction &I : *BB) {
+      PHINode *P = dyn_cast<PHINode>(&I);
+      if (!P)
+        break;
+
+      if (!VisitedInstrs.count(P))
+        Incoming.push_back(P);
+    }
+
+    // Sort by type.
+    std::stable_sort(Incoming.begin(), Incoming.end(), PhiTypeSorterFunc);
+
+    // Try to vectorize elements base on their type.
+    for (SmallVector<Value *, 4>::iterator IncIt = Incoming.begin(),
+                                           E = Incoming.end();
+         IncIt != E;) {
+
+      // Look for the next elements with the same type.
+      SmallVector<Value *, 4>::iterator SameTypeIt = IncIt;
+      while (SameTypeIt != E &&
+             (*SameTypeIt)->getType() == (*IncIt)->getType()) {
+        VisitedInstrs.insert(*SameTypeIt);
+        ++SameTypeIt;
+      }
+
+      // Try to vectorize them.
+      unsigned NumElts = (SameTypeIt - IncIt);
+      LLVM_DEBUG(dbgs() << "SLP: Trying to vectorize starting at PHIs ("
+                        << NumElts << ")\n");
+      // The order in which the phi nodes appear in the program does not matter.
+      // So allow tryToVectorizeList to reorder them if it is beneficial. This
+      // is done when there are exactly two elements since tryToVectorizeList
+      // asserts that there are only two values when AllowReorder is true.
+      bool AllowReorder = NumElts == 2;
+      if (NumElts > 1 && tryToVectorizeList(makeArrayRef(IncIt, NumElts), R,
+                                            /*UserCost=*/0, AllowReorder)) {
+        // Success start over because instructions might have been changed.
+        HaveVectorizedPhiNodes = true;
+        Changed = true;
+        break;
+      }
+
+      // Start over at the next instruction of a different type (or the end).
+      IncIt = SameTypeIt;
+    }
+  }
+
+  VisitedInstrs.clear();
+
+  SmallVector<WeakVH, 8> PostProcessInstructions;
+  SmallDenseSet<Instruction *, 4> KeyNodes;
+  for (BasicBlock::iterator it = BB->begin(), e = BB->end(); it != e; it++) {
+    // We may go through BB multiple times so skip the one we have checked.
+    if (!VisitedInstrs.insert(&*it).second) {
+      if (it->use_empty() && KeyNodes.count(&*it) > 0 &&
+          vectorizeSimpleInstructions(PostProcessInstructions, BB, R)) {
+        // We would like to start over since some instructions are deleted
+        // and the iterator may become invalid value.
+        Changed = true;
+        it = BB->begin();
+        e = BB->end();
+      }
+      continue;
+    }
+
+    if (isa<DbgInfoIntrinsic>(it))
+      continue;
+
+    // Try to vectorize reductions that use PHINodes.
+    if (PHINode *P = dyn_cast<PHINode>(it)) {
+      // Check that the PHI is a reduction PHI.
+      if (P->getNumIncomingValues() != 2)
+        return Changed;
+
+      // Try to match and vectorize a horizontal reduction.
+      if (vectorizeRootInstruction(P, getReductionValue(DT, P, BB, LI), BB, R,
+                                   TTI)) {
+        Changed = true;
+        it = BB->begin();
+        e = BB->end();
+        continue;
+      }
+      continue;
+    }
+
+    // Ran into an instruction without users, like terminator, or function call
+    // with ignored return value, store. Ignore unused instructions (basing on
+    // instruction type, except for CallInst and InvokeInst).
+    if (it->use_empty() && (it->getType()->isVoidTy() || isa<CallInst>(it) ||
+                            isa<InvokeInst>(it))) {
+      KeyNodes.insert(&*it);
+      bool OpsChanged = false;
+      if (ShouldStartVectorizeHorAtStore || !isa<StoreInst>(it)) {
+        for (auto *V : it->operand_values()) {
+          // Try to match and vectorize a horizontal reduction.
+          OpsChanged |= vectorizeRootInstruction(nullptr, V, BB, R, TTI);
+        }
+      }
+      // Start vectorization of post-process list of instructions from the
+      // top-tree instructions to try to vectorize as many instructions as
+      // possible.
+      OpsChanged |= vectorizeSimpleInstructions(PostProcessInstructions, BB, R);
+      if (OpsChanged) {
+        // We would like to start over since some instructions are deleted
+        // and the iterator may become invalid value.
+        Changed = true;
+        it = BB->begin();
+        e = BB->end();
+        continue;
+      }
+    }
+
+    if (isa<InsertElementInst>(it) || isa<CmpInst>(it) ||
+        isa<InsertValueInst>(it))
+      PostProcessInstructions.push_back(&*it);
+  }
+
+  return Changed;
+}
+
+
+
 
 char Revectorizer::ID = 0;
 
