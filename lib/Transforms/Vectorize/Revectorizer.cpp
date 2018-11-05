@@ -107,6 +107,14 @@ using namespace revectorizer;
 #define SV_NAME "revectorizer"
 #define DEBUG_TYPE "REVEC"
 
+#define DEBUG_REDUCTIONS
+
+#ifdef DEBUG_REDUCTIONS
+#define REVEC_DEBUG(x) x
+#else
+#define REVEC_DEBUG(x) LLVM_DEBUG(x)
+#endif
+
 STATISTIC(NumVectorInstructions, "Number of vector instructions generated");
 
 static cl::opt<int>
@@ -184,6 +192,7 @@ static bool isValidElementType(Type *Ty) {
   return Ty->isVectorTy();
 }
 
+//get the vector type for the fused vector
 static VectorType *getVectorType(Type *ElementTy, unsigned numElements) {
   // Get the new vector type, if elements are vectors
   if (VectorType *VecElementTy = dyn_cast<VectorType>(ElementTy)) {
@@ -195,6 +204,7 @@ static VectorType *getVectorType(Type *ElementTy, unsigned numElements) {
   return VectorType::get(ElementTy, numElements);
 }
 
+// gets the final elements in the fused vector
 static unsigned getFusedSize(ArrayRef<Value *> VL) {
   // Get the total number of elements in vectors contained in VL
   VectorType *ty0 = cast<VectorType>(VL[0]->getType());
@@ -6837,7 +6847,7 @@ static Value *getReductionValue(const DominatorTree *DT, PHINode *P,
     Rdx = P->getIncomingValue(1);
   }
 
-  if (Rdx && DominatedReduxValue(Rdx))
+  if (Rdx && DominatedReduxValue(Rdx) && isValidElementType(Rdx->getType()))
     return Rdx;
 
   // Otherwise, check whether we have a loop latch to look at.
@@ -6856,7 +6866,7 @@ static Value *getReductionValue(const DominatorTree *DT, PHINode *P,
     Rdx = P->getIncomingValue(1);
   }
 
-  if (Rdx && DominatedReduxValue(Rdx))
+  if (Rdx && DominatedReduxValue(Rdx) && isValidElementType(Rdx->getType()))
     return Rdx;
 
   return nullptr;
@@ -6916,11 +6926,16 @@ bool RevectorizerPass::vectorizeSimpleInstructions(
     auto *I = dyn_cast_or_null<Instruction>(VH);
     if (!I)
       continue;
-    if (auto *LastInsertValue = dyn_cast<InsertValueInst>(I))
-      OpsChanged |= vectorizeInsertValueInst(LastInsertValue, BB, R);
-    else if (auto *LastInsertElem = dyn_cast<InsertElementInst>(I))
-      OpsChanged |= vectorizeInsertElementInst(LastInsertElem, BB, R);
-    else if (auto *CI = dyn_cast<CmpInst>(I))
+
+    auto *LastInsertValue = dyn_cast<InsertValueInst>(I);
+    auto *LastInsertElem = dyn_cast<InsertElementInst>(I);
+    assert(!LastInsertValue && !LastInsertElem);
+
+    //if (auto *LastInsertValue = dyn_cast<InsertValueInst>(I))
+    //  OpsChanged |= vectorizeInsertValueInst(LastInsertValue, BB, R);
+    //else if (auto *LastInsertElem = dyn_cast<InsertElementInst>(I))
+    //  OpsChanged |= vectorizeInsertElementInst(LastInsertElem, BB, R);
+    if (auto *CI = dyn_cast<CmpInst>(I))
       OpsChanged |= vectorizeCmpInst(CI, BB, R);
   }
   Instructions.clear();
@@ -6931,6 +6946,7 @@ bool RevectorizerPass::vectorizeSimpleInstructions(
 
 // reductions related functions
 bool RevectorizerPass::vectorizeChainsInBlock(BasicBlock *BB, BoUpSLP &R) {
+
   bool Changed = false;
   SmallVector<Value *, 4> Incoming;
   SmallPtrSet<Value *, 16> VisitedInstrs;
@@ -6968,7 +6984,7 @@ bool RevectorizerPass::vectorizeChainsInBlock(BasicBlock *BB, BoUpSLP &R) {
 
       // Try to vectorize them.
       unsigned NumElts = (SameTypeIt - IncIt);
-      LLVM_DEBUG(dbgs() << "SLP: Trying to vectorize starting at PHIs ("
+      LLVM_DEBUG(dbgs() << "Revec: Trying to vectorize starting at PHIs ("
                         << NumElts << ")\n");
       // The order in which the phi nodes appear in the program does not matter.
       // So allow tryToVectorizeList to reorder them if it is beneficial. This
@@ -6987,6 +7003,8 @@ bool RevectorizerPass::vectorizeChainsInBlock(BasicBlock *BB, BoUpSLP &R) {
       IncIt = SameTypeIt;
     }
   }
+
+  //upto PHI-Nodes it's revectorizing
 
   VisitedInstrs.clear();
 
@@ -7017,8 +7035,15 @@ bool RevectorizerPass::vectorizeChainsInBlock(BasicBlock *BB, BoUpSLP &R) {
       if (P->getNumIncomingValues() != 2)
         return Changed;
 
+
+      //get the reduction value first
+      Value * RedVal = getReductionValue(DT, P, BB, LI);
+
+      if(RedVal)
+	REVEC_DEBUG(dbgs() << "reduction : " << *P << "\n" << *RedVal << "\n");
+
       // Try to match and vectorize a horizontal reduction.
-      if (vectorizeRootInstruction(P, getReductionValue(DT, P, BB, LI), BB, R,
+      if (vectorizeRootInstruction(P, RedVal, BB, R,
                                    TTI)) {
         Changed = true;
         it = BB->begin();
@@ -7125,7 +7150,7 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
   if (VL.size() < 2)
     return false;
 
-  LLVM_DEBUG(dbgs() << "SLP: Trying to vectorize a list of length = "
+  LLVM_DEBUG(dbgs() << "Revec: Trying to vectorize a list of length = "
                     << VL.size() << ".\n");
 
   // Check that all of the parts are scalar instructions of the same type,
@@ -7164,6 +7189,14 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
     }
   }
 
+  bool debugP;
+  PHINode * P = dyn_cast<PHINode>(VL[0]);
+  if(P){
+    dbgs() << *VL[0] << "\n";
+    dbgs() << MaxVF << "\n";
+    debugP = true;
+  }
+
   bool Changed = false;
   bool CandidateFound = false;
   int MinCost = RevecCostThreshold;
@@ -7177,7 +7210,7 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
     // No actual vectorization should happen, if number of parts is the same as
     // provided vectorization factor (i.e. the scalar type is used for vector
     // code during codegen).
-    auto *VecTy = VectorType::get(VL[0]->getType(), VF);
+    auto *VecTy = getVectorType(VL[0]->getType(), VF);
     if (TTI->getNumberOfParts(VecTy) == VF)
       continue;
     for (unsigned I = NextInst; I < MaxInst; ++I) {
@@ -7195,8 +7228,9 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
       if (hasValueBeenRAUWed(VL, TrackValues, I, OpsWidth))
         continue;
 
-      LLVM_DEBUG(dbgs() << "SLP: Analyzing " << OpsWidth << " operations "
-                        << "\n");
+      if(debugP)
+	REVEC_DEBUG(dbgs() << "Revec: Analyzing " << OpsWidth << " operations "
+		    << "\n");
       ArrayRef<Value *> Ops = VL.slice(I, OpsWidth);
 
       R.buildTree(Ops);
@@ -7223,7 +7257,8 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
       MinCost = std::min(MinCost, Cost);
 
       if (Cost < -RevecCostThreshold) {
-        LLVM_DEBUG(dbgs() << "SLP: Vectorizing list at cost:" << Cost << ".\n");
+        if(debugP)
+	  REVEC_DEBUG(dbgs() << "Revec: Vectorizing list at cost:" << Cost << ".\n");
         R.getORE()->emit(OptimizationRemark(SV_NAME, "VectorizedList",
                                                     cast<Instruction>(Ops[0]))
                                  << "SLP vectorized with cost " << ore::NV("Cost", Cost)
