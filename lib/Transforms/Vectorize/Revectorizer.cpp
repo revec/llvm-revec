@@ -3320,8 +3320,7 @@ int BoUpSLP::getTreeCost() {
        << "Total = " << Cost << ".\n";
   }
   LLVM_DEBUG(dbgs() << Str);
-  printf("%s", Str.c_str());
-
+  
   if (WriteRevecTree)
     WriteGraph(this, "Revec" + F->getName(), false, Str);
 
@@ -5498,7 +5497,6 @@ bool RevectorizerPass::vectorizeStoreChain(ArrayRef<Value *> Chain, BoUpSLP &R,
   const unsigned ChainLen = Chain.size();
   LLVM_DEBUG(dbgs() << "Revec: Analyzing a store chain of length " << ChainLen
         << "\n");
-  printf("Revec: Analyzing a store chain of length %d\n", (int) ChainLen);
   for (auto *StoreValue : Chain) {
     LLVM_DEBUG(dbgs() << "Revec:   " << *StoreValue << "\n");
   }
