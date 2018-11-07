@@ -192,6 +192,7 @@ static bool isValidElementType(Type *Ty) {
   return Ty->isVectorTy();
 }
 
+
 //get the vector type for the fused vector
 static VectorType *getVectorType(Type *ElementTy, unsigned numElements) {
   // Get the new vector type, if elements are vectors
@@ -705,6 +706,8 @@ public:
   using ExtraValueToDebugLocsMap =
       MapVector<Value *, SmallVector<Instruction *, 2>>;
 
+  bool EnableDebug = false;
+
   BoUpSLP(Function *Func, ScalarEvolution *Se, TargetTransformInfo *Tti,
           TargetLibraryInfo *TLi, AliasAnalysis *Aa, LoopInfo *Li,
           DominatorTree *Dt, AssumptionCache *AC, DemandedBits *DB,
@@ -741,6 +744,25 @@ public:
   bool isNarrowVectorType(const Type *T) const {
     return T->getPrimitiveSizeInBits() < MaxVecRegSize;
   }
+
+  //get the maximum packing factor
+  unsigned getMaxPackingFactor(Value * V){
+  
+    unsigned vectorSize = 0;
+
+
+    //get the size in bits
+    if (auto *Store = dyn_cast<StoreInst>(V))
+      vectorSize = DL->getTypeSizeInBits(Store->getValueOperand()->getType());
+    else
+      vectorSize = DL->getTypeSizeInBits(V->getType());
+
+    return MaxVecRegSize / vectorSize;
+
+
+  }
+
+
 
   /// \returns the cost incurred by unwanted spills and fills, caused by
   /// holding live values over call sites.
@@ -2335,6 +2357,9 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
           LLVM_DEBUG(dbgs() << "Revec: Found intrinsic function " << IID << ", " << llvm::Intrinsic::getName(IID) << "\n");
 
         // Find intrinsic conversion and merge factor
+
+	LLVM_DEBUG(dbgs() << "Revec: intrinsic size " << VL.size() << "\n");
+
         const auto& target = getWidenedIntrinsic(IID, VL.size());
         int VF = target.first;
         Intrinsic::ID alt = target.second;
@@ -5464,14 +5489,14 @@ bool RevectorizerPass::runImpl(Function &F, ScalarEvolution *SE_,
 
   // Scan the blocks in the function in post order.
   for (auto BB : post_order(&F.getEntryBlock())) {
-    collectSeedInstructions(BB, R);
+    //collectSeedInstructions(BB, R);
 
     // Vectorize trees that end at stores.
-    if (!Stores.empty()) {
-      LLVM_DEBUG(dbgs() << "Revec: Found stores for " << Stores.size()
-                   << " underlying objects.\n");
-      Changed |= vectorizeStoreChains(R);
-    }
+    //if (!Stores.empty()) {
+    //  LLVM_DEBUG(dbgs() << "Revec: Found stores for " << Stores.size()
+    //               << " underlying objects.\n");
+    //  Changed |= vectorizeStoreChains(R);
+    //}
 
     // Vectorize trees that end at reductions.
     Changed |= vectorizeChainsInBlock(BB, R);
@@ -5747,6 +5772,12 @@ bool RevectorizerPass::vectorizeStoreChains(BoUpSLP &R) {
 static Value *createRdxShuffleMask(unsigned VecLen, unsigned NumEltsToRdx,
                                    bool IsPairwise, bool IsLeft,
                                    IRBuilder<> &Builder);
+
+
+ static void printBundle(ArrayRef<Value *> &V){
+   for(unsigned i = 0; i < V.size(); i++)
+     REVEC_DEBUG(dbgs() << *V[i] << "\n");
+ }
 
 namespace {
 
@@ -6137,6 +6168,19 @@ class HorizontalReduction {
       }
       return Flags;
     }
+
+
+    void printOpData(){
+      dbgs() << "opcode : " << Opcode << "\n";
+      if(LHS)
+	dbgs() << "lhs : " << *LHS << "\n";
+      if(RHS)
+	dbgs() << "rhs : " << *RHS << "\n";
+      dbgs() << "kind : " << Kind << " " << RK_None << "\n";
+      dbgs() << "isVector : " << isVectorizable() << "\n";
+       
+    }
+
   };
 
   Instruction *ReductionRoot = nullptr;
@@ -6304,6 +6348,7 @@ public:
 
     if (!ReductionData.isVectorizable(B))
       return false;
+  
 
     Type *Ty = B->getType();
     if (!isValidElementType(Ty))
@@ -6314,21 +6359,43 @@ public:
     ReducedValueData.clear();
     ReductionRoot = B;
 
+    dbgs() << "vectorizable reductions : " << *B << "\n";
+  
+
     // Post order traverse the reduction tree starting at B. We only handle true
     // trees containing only binary operators.
     SmallVector<std::pair<Instruction *, unsigned>, 32> Stack;
     Stack.push_back(std::make_pair(B, ReductionData.getFirstOperandIndex()));
     ReductionData.initReductionOps(ReductionOps);
+
+    dbgs() << "for ins first: " << *B << "\n";
+    ReductionData.printOpData();
+
     while (!Stack.empty()) {
+
+      LLVM_DEBUG(dbgs() << "stack contents : [\n");
+      for(unsigned i = 0; i < Stack.size(); i++){
+	LLVM_DEBUG(dbgs() << *Stack[i].first << "\n");
+	LLVM_DEBUG(dbgs() << Stack[i].second << "\n");
+      }
+      LLVM_DEBUG(dbgs() << "]\n");
+
+
       Instruction *TreeN = Stack.back().first;
       unsigned EdgeToVist = Stack.back().second++;
       OperationData OpData = getOperationData(TreeN);
+
+      dbgs() << "for ins in loop: " << *TreeN << "\n";
+      OpData.printOpData();
+
       bool IsReducedValue = OpData != ReductionData;
 
       // Postorder vist.
       if (IsReducedValue || EdgeToVist == OpData.getNumberOfOperands()) {
-        if (IsReducedValue)
+        if (IsReducedValue){
+	  LLVM_DEBUG(dbgs() << "reducedVal = true\n");
           ReducedVals.push_back(TreeN);
+	}
         else {
           auto I = ExtraArgs.find(TreeN);
           if (I != ExtraArgs.end() && !I->second) {
@@ -6347,12 +6414,16 @@ public:
             ReductionData.addReductionOps(TreeN, ReductionOps);
         }
         // Retract.
+	LLVM_DEBUG(dbgs() << "poped\n");
         Stack.pop_back();
         continue;
       }
 
       // Visit left or right.
       Value *NextV = TreeN->getOperand(EdgeToVist);
+      dbgs() << "NextV" << *NextV << "\n";
+      if(Phi)
+	dbgs() << "Phi" << *Phi << "\n";
       if (NextV != Phi) {
         auto *I = dyn_cast<Instruction>(NextV);
         OpData = getOperationData(I);
@@ -6405,6 +6476,13 @@ public:
       // NextV is an extra argument for TreeN (its parent operation).
       markExtraArg(Stack.back(), NextV);
     }
+
+    dbgs() << "printing reduced values: \n";
+    for(unsigned i = 0; i < ReducedVals.size(); i++){
+      dbgs() << *ReducedVals[i] << "\n";
+    }
+
+
     return true;
   }
 
@@ -6421,7 +6499,11 @@ public:
     if (NumReducedVals < 4)
       return false;
 
-    unsigned ReduxWidth = PowerOf2Floor(NumReducedVals);
+    
+    //unsigned ReduxWidth = PowerOf2Floor(NumReducedVals);
+    unsigned ReduxWidth = PowerOf2Floor(V.getMaxPackingFactor(ReducedVals[0]));
+    LLVM_DEBUG(dbgs() << "redux width : " << ReduxWidth << "\n");
+
 
     Value *VectorizedTree = nullptr;
     IRBuilder<> Builder(ReductionRoot);
@@ -6438,9 +6520,16 @@ public:
     SmallVector<Value *, 16> IgnoreList;
     for (auto &V : ReductionOps)
       IgnoreList.append(V.begin(), V.end());
-    while (i < NumReducedVals - ReduxWidth + 1 && ReduxWidth > 2) {
+    while (i < NumReducedVals - ReduxWidth + 1 && ReduxWidth >= 2) { //equal added by me
       auto VL = makeArrayRef(&ReducedVals[i], ReduxWidth);
+     
+      dbgs() << "before buildTree\n";
+      printBundle(VL);
+
+      V.EnableDebug = true;
       V.buildTree(VL, ExternallyUsedValues, IgnoreList);
+      V.EnableDebug = false;
+
       Optional<ArrayRef<unsigned>> Order = V.bestOrder();
       // TODO: Handle orders of size less than number of elements in the vector.
       if (Order && Order->size() == VL.size()) {
@@ -6450,6 +6539,11 @@ public:
                         [VL](const unsigned Idx) { return VL[Idx]; });
         V.buildTree(ReorderedOps, ExternallyUsedValues, IgnoreList);
       }
+
+
+      dbgs() << "tree size: " << V.getTreeSize() << "\n";
+
+
       if (V.isTreeTinyAndNotFullyVectorizable())
         break;
 
@@ -6458,6 +6552,12 @@ public:
 
       // Estimate cost.
       int TreeCost = V.getTreeCost();
+
+      i += ReduxWidth;
+      ReduxWidth = PowerOf2Floor(NumReducedVals - i);
+      continue;
+
+
       int ReductionCost = getReductionCost(TTI, ReducedVals[i], ReduxWidth);
       int Cost = TreeCost + ReductionCost;
       if (Cost >= -RevecCostThreshold) {
@@ -6472,7 +6572,7 @@ public:
           break;
       }
 
-      LLVM_DEBUG(dbgs() << "SLP: Vectorizing horizontal reduction at cost:"
+      REVEC_DEBUG(dbgs() << "SLP: Vectorizing horizontal reduction at cost:"
                         << Cost << ". (HorRdx)\n");
       V.getORE()->emit([&]() {
           return OptimizationRemark(
@@ -6991,13 +7091,13 @@ bool RevectorizerPass::vectorizeChainsInBlock(BasicBlock *BB, BoUpSLP &R) {
       // is done when there are exactly two elements since tryToVectorizeList
       // asserts that there are only two values when AllowReorder is true.
       bool AllowReorder = NumElts == 2;
-      if (NumElts > 1 && tryToVectorizeList(makeArrayRef(IncIt, NumElts), R,
-                                            /*UserCost=*/0, AllowReorder)) {
-        // Success start over because instructions might have been changed.
-        HaveVectorizedPhiNodes = true;
-        Changed = true;
-        break;
-      }
+      //if (NumElts > 1 && tryToVectorizeList(makeArrayRef(IncIt, NumElts), R,
+      //                                      /*UserCost=*/0, AllowReorder)) {
+      //  // Success start over because instructions might have been changed.
+      //  HaveVectorizedPhiNodes = true;
+      //  Changed = true;
+      //  break;
+      //}
 
       // Start over at the next instruction of a different type (or the end).
       IncIt = SameTypeIt;
@@ -7014,17 +7114,17 @@ bool RevectorizerPass::vectorizeChainsInBlock(BasicBlock *BB, BoUpSLP &R) {
     
     //TODO: change vectorizeSimpleInstructions
     // We may go through BB multiple times so skip the one we have checked.
-    if (!VisitedInstrs.insert(&*it).second) {
-      if (it->use_empty() && KeyNodes.count(&*it) > 0 &&
-          vectorizeSimpleInstructions(PostProcessInstructions, BB, R)) {
+    //if (!VisitedInstrs.insert(&*it).second) {
+    //  if (it->use_empty() && KeyNodes.count(&*it) > 0 &&
+    //      vectorizeSimpleInstructions(PostProcessInstructions, BB, R)) {
         // We would like to start over since some instructions are deleted
         // and the iterator may become invalid value.
-        Changed = true;
-        it = BB->begin();
-        e = BB->end();
-      }
-      continue;
-    }
+    //    Changed = true;
+    //    it = BB->begin();
+    //    e = BB->end();
+    //  }
+    //  continue;
+    //}
 
     if (isa<DbgInfoIntrinsic>(it))
       continue;
@@ -7069,20 +7169,20 @@ bool RevectorizerPass::vectorizeChainsInBlock(BasicBlock *BB, BoUpSLP &R) {
       // Start vectorization of post-process list of instructions from the
       // top-tree instructions to try to vectorize as many instructions as
       // possible.
-      OpsChanged |= vectorizeSimpleInstructions(PostProcessInstructions, BB, R);
-      if (OpsChanged) {
+      //OpsChanged |= vectorizeSimpleInstructions(PostProcessInstructions, BB, R);
+      //if (OpsChanged) {
         // We would like to start over since some instructions are deleted
         // and the iterator may become invalid value.
-        Changed = true;
-        it = BB->begin();
-        e = BB->end();
-        continue;
-      }
+      //  Changed = true;
+      //  it = BB->begin();
+      //  e = BB->end();
+      //  continue;
+      //}
     }
 
-    if (isa<InsertElementInst>(it) || isa<CmpInst>(it) ||
-        isa<InsertValueInst>(it))
-      PostProcessInstructions.push_back(&*it);
+    //if (isa<InsertElementInst>(it) || isa<CmpInst>(it) ||
+    //    isa<InsertValueInst>(it))
+    //  PostProcessInstructions.push_back(&*it);
   }
 
   return Changed;
