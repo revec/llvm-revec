@@ -2474,7 +2474,7 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
         }
 #endif
 
-      if (allConstant(Right) || allConstant(Left) || isSplat(Masks)) {
+      if (allConstant(Right) || allConstant(Left) || isSplat(Masks) || isSplat(Left)) {
         // Widen operands vertically, and merge shuffle masks
         //
         // Example if isSplat(Masks) (from Simd library, avx2_interleave):
@@ -3882,13 +3882,13 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
 
   VectorType *VecTy = getVectorType(ElementTy, E->Scalars.size());
 
-	LLVM_DEBUG(dbgs() << "Revec: vectorizing bundle : \n");
-	LLVM_DEBUG(
-		for (unsigned i = 0; i< E->Scalars.size(); i++) {
-			dbgs() << "  ";
-			E->Scalars[i]->print(dbgs());
-			dbgs() << "\n";
-		}
+  LLVM_DEBUG(dbgs() << "Revec: vectorizing bundle : \n");
+  LLVM_DEBUG(
+  	for (unsigned i = 0; i< E->Scalars.size(); i++) {
+  	  dbgs() << "  ";
+  	  E->Scalars[i]->print(dbgs());
+  	  dbgs() << "\n";
+  	}
 
     dbgs() << "Revec:   E->ReuseShuffleIndices, size = " << E->ReuseShuffleIndices.size() << ": \n";
     for (unsigned i = 0; i < E->ReuseShuffleIndices.size(); i++) {
@@ -3901,8 +3901,8 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       dbgs() << " " << E->ReuseShuffleMask[i] << " ";
     }
     dbgs() << "\n";
-	);
-	LLVM_DEBUG(dbgs() << "  Revec: Need to gather: " << (E->NeedToGather ? "yes" : "no") << "\n");
+  );
+  LLVM_DEBUG(dbgs() << "  Revec: Need to gather: " << (E->NeedToGather ? "yes" : "no") << "\n");
 
   bool NeedToShuffleReuses = !E->ReuseShuffleIndices.empty();
   assert(((NeedToShuffleReuses && !E->ReuseShuffleMask.empty()) ||
@@ -3920,6 +3920,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       }
     }
     E->VectorizedValue = V;
+    LLVM_DEBUG(dbgs() << "  Revec: vectorized value: " << *V << "\n");
     return V;
   }
 
@@ -3963,6 +3964,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
 
       assert(NewPhi->getNumIncomingValues() == PH->getNumIncomingValues() &&
              "Invalid number of incoming values");
+      LLVM_DEBUG(dbgs() << "  Revec: vectorized value: " << *V << "\n");
       return V;
     }
     case Instruction::ExtractValue:
@@ -4022,6 +4024,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       }
       E->VectorizedValue = V;
       ++NumVectorInstructions;
+      LLVM_DEBUG(dbgs() << "  Revec: vectorized value: " << *V << "\n");
       return V;
     }
     case Instruction::FCmp:
@@ -4056,6 +4059,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       }
       E->VectorizedValue = V;
       ++NumVectorInstructions;
+      LLVM_DEBUG(dbgs() << "  Revec: vectorized value: " << *V << "\n");
       return V;
     }
     case Instruction::Select: {
@@ -4084,6 +4088,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       }
       E->VectorizedValue = V;
       ++NumVectorInstructions;
+      LLVM_DEBUG(dbgs() << "  Revec: vectorized value: " << *V << "\n");
       return V;
     }
     case Instruction::Add:
@@ -4138,6 +4143,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       E->VectorizedValue = V;
       ++NumVectorInstructions;
 
+      LLVM_DEBUG(dbgs() << "  Revec: vectorized value: " << *V << "\n");
       return V;
     }
     case Instruction::Load: {
@@ -4184,6 +4190,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
 
       E->VectorizedValue = V;
       ++NumVectorInstructions;
+      LLVM_DEBUG(dbgs() << "  Revec: vectorized value: " << *V << "\n");
       return V;
     }
     case Instruction::Store: {
@@ -4219,6 +4226,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       }
       E->VectorizedValue = V;
       ++NumVectorInstructions;
+      LLVM_DEBUG(dbgs() << "  Revec: vectorized value: " << *V << "\n");
       return V;
     }
     case Instruction::GetElementPtr: {
@@ -4253,6 +4261,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       E->VectorizedValue = V;
       ++NumVectorInstructions;
 
+      LLVM_DEBUG(dbgs() << "  Revec: vectorized value: " << *V << "\n");
       return V;
     }
     case Instruction::Call: {
@@ -4313,6 +4322,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
 
       E->VectorizedValue = V;
       ++NumVectorInstructions;
+      LLVM_DEBUG(dbgs() << "  Revec: vectorized value: " << *V << "\n");
       return V;
     }
     case Instruction::ShuffleVector: {
@@ -4371,6 +4381,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
         E->VectorizedValue = V;
         ++NumVectorInstructions;
 
+        LLVM_DEBUG(dbgs() << "  Revec: vectorized value: " << *V << "\n");
         return V;
       }
 
@@ -4532,6 +4543,7 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       assert(V && "Unable to merge shuffles");
       E->VectorizedValue = V;
       ++NumVectorInstructions;
+      LLVM_DEBUG(dbgs() << "  Revec: vectorized value: " << *V << "\n");
       return V;
     }
     default:
