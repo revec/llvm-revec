@@ -147,7 +147,10 @@ static bool isAVecIns(Instruction * I){
   }
   else{
     if(StoreInst * st = dyn_cast<StoreInst>(I)){
-      return st->getValueOperand()->getType()->isVectorTy();
+      Type *valTy = st->getValueOperand()->getType();
+      VectorType *vecTy = dyn_cast<VectorType>(valTy);
+      // TODO: The primitive size check filters out vectors of pointers. Should we allow this?
+      return vecTy && vecTy->getScalarSizeInBits() > 0;
     }
     return false;
   }
@@ -691,7 +694,8 @@ unsigned RevecAnalysis::calculateUnrollCount() {
   unsigned elements = vecTy->getNumElements();
   unsigned element_size = vecTy->getElementType()->getPrimitiveSizeInBits();
   
-  CHDEBUG(dbgs() << "REVAN: initial seeds elems " << elements << " of size " << element_size << "\n");
+  CHDEBUG(dbgs() << "REVAN: initial seeds elems " << elements << " of size " << element_size << " for store value ty " << *ty << "\n");
+  CHDEBUG(dbgs() << "REVAN:   store: " << *st << "\n");
   
   //technically this constraint can be reduced as well by merge_amount = lcm(maxWidth / element_size, elements) -> this needs unpacking and repacking within a bundle - what does this mean?
   
