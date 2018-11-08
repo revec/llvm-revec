@@ -2990,6 +2990,10 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
 
       int FusedVecCallCost =
           TTI->getIntrinsicInstrCost(alt, wideReturnTy, WideArgTys, FMF);
+      if (FusedVecCallCost == NarrowVecCallCost) {
+        // Discount fused cost by 0.0625 * VL.size() * narrow inst cost
+        FusedVecCallCost = std::max(0, FusedVecCallCost - NarrowVecCallCost / 16);
+      }
 
       LLVM_DEBUG(dbgs() << "Revec: Cost of widened call with intrinsic "
 												<< (llvm::Intrinsic::isOverloaded(alt) ? std::to_string(alt) : Intrinsic::getName(alt).str())
