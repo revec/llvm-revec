@@ -349,6 +349,23 @@ static void expandLanes(ArrayRef<unsigned> Lanes, unsigned NumEltsVL0, SmallVect
   }
 }
 
+static bool allSameIntrinsic(ArrayRef<Value *> VL) {
+  // Check that all calls use the same intrinsic
+  CallInst *CI = cast<CallInst>(VL[0]);
+  Intrinsic::ID IID = getIntrinsicByCall(CI);
+
+  for (unsigned i = 1; i < VL.size(); ++i) {
+    CallInst *CI_i = dyn_cast<CallInst>(VL[i]);
+    if (CI_i == nullptr)
+      return false;
+
+    if (getIntrinsicByCall(CI_i) != IID)
+      return false;
+  }
+
+  return true;
+}
+
 namespace {
 
 /// Contains data for the instructions going to be vectorized.
@@ -2287,59 +2304,78 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
     case Instruction::Call: {
       // Check if the calls are all to the same vectorizable intrinsic.
       CallInst *CI = cast<CallInst>(VL0);
-
       Intrinsic::ID IID = getIntrinsicByCall(CI);
 
-      if (IID != Intrinsic::not_intrinsic) {
-        if (llvm::Intrinsic::isOverloaded(IID))
-          // TODO: Use other implementation of getName
-          LLVM_DEBUG(dbgs() << "Revec: Found intrinsic function overloading: " << IID << "\n");
-        else
-          LLVM_DEBUG(dbgs() << "Revec: Found intrinsic function " << IID << ", " << llvm::Intrinsic::getName(IID) << "\n");
-
-        // Find intrinsic conversion and merge factor
-        const auto& target = getWidenedIntrinsic(IID, VL.size());
-        int VF = target.first;
-        Intrinsic::ID alt = target.second;
-
-        if (alt != Intrinsic::not_intrinsic && VF > 0) {
-          assert(VF == static_cast<long>(VL.size()) && "getWidenedIntrinsic returned a VF not requested");
-
-          if (llvm::Intrinsic::isOverloaded(alt))
-            LLVM_DEBUG(dbgs() << "Revec:   possible conversion (overloading): " << alt
-                    << " widening factor: " << VF << ".\n");
-          else
-            LLVM_DEBUG(dbgs() << "Revec:   possible conversion: " << llvm::Intrinsic::getName(alt)
-                    << " widening factor: " << VF << ".\n");
-
-          newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
-
-          for (unsigned i = 0, e = CI->getNumArgOperands(); i != e; ++i) {
-            ValueList Operands;
-            // Prepare the operand vector.
-            for (Value *val : VL) {
-              CallInst *CI2 = dyn_cast<CallInst>(val);
-              Operands.push_back(CI2->getArgOperand(i));
-            }
-            buildTree_rec(Operands, Depth + 1, UserTreeIdx);
-          }
-
-          return;
-        } else {
-          // TODO: emit an optimization missed remark
-          LLVM_DEBUG(dbgs()
-              << "Revec:   no conversion found.\n"
-              << "Revec:     First narrow call: " << *CI << "\n"
-              << "Revec:     Narrow key: " << static_cast<unsigned>(IID));
-          if (!llvm::Intrinsic::isOverloaded(IID))
-            LLVM_DEBUG(dbgs() << " name: " << llvm::Intrinsic::getName(IID) << "\n");
-          else
-            LLVM_DEBUG(dbgs() << " (overloading)\n");
-        }
+      if (IID == Intrinsic::not_intrinsic) {
+        LLVM_DEBUG(dbgs() << "Revec: Call bundle contains non-intrinsic " << *CI << "\n");
+        BS.cancelScheduling(VL, VL0);
+        newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
+        return;
       }
 
-      // Found a non-intrinsic call or intrinsic cannot be widened
-      // Cancel scheduling this tree
+      if (!allSameIntrinsic(VL)) {
+        // TODO: Split the bundle into halves if the halves match.
+        LLVM_DEBUG(
+          dbgs() << "Revec: Bundle contains different intrinsics.\n";
+          for (Value *val : VL)
+            dbgs() << "Revec:   " << *val << "\n";
+        );
+
+        BS.cancelScheduling(VL, VL0);
+        newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
+        return;
+      }
+
+      LLVM_DEBUG(
+        if (llvm::Intrinsic::isOverloaded(IID))
+          dbgs() << "Revec: Found intrinsic function overloading: " << IID << "\n";
+        else
+          dbgs() << "Revec: Found intrinsic function " << IID << ", " << llvm::Intrinsic::getName(IID) << "\n";
+      );
+
+      // Find intrinsic conversion and merge factor
+      const auto& target = getWidenedIntrinsic(IID, VL.size());
+      int VF = target.first;
+      Intrinsic::ID alt = target.second;
+
+      if (alt != Intrinsic::not_intrinsic && VF > 0) {
+        assert(VF == static_cast<long>(VL.size()) && "getWidenedIntrinsic returned a VF not requested");
+
+        if (llvm::Intrinsic::isOverloaded(alt))
+          LLVM_DEBUG(dbgs() << "Revec:   possible conversion (overloading): " << alt
+                  << " widening factor: " << VF << ".\n");
+        else
+          LLVM_DEBUG(dbgs() << "Revec:   possible conversion: " << llvm::Intrinsic::getName(alt)
+                  << " widening factor: " << VF << ".\n");
+
+        newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
+
+        for (unsigned i = 0, e = CI->getNumArgOperands(); i != e; ++i) {
+          ValueList Operands;
+          // Prepare the operand vector.
+          for (Value *val : VL) {
+            CallInst *CI2 = dyn_cast<CallInst>(val);
+            Operands.push_back(CI2->getArgOperand(i));
+          }
+          buildTree_rec(Operands, Depth + 1, UserTreeIdx);
+        }
+
+        return;
+      }
+
+      // Intrinsic cannot be widened. Cancel scheduling this tree
+      // TODO: emit an optimization missed remark
+      LLVM_DEBUG(
+        dbgs()
+          << "Revec:   no conversion found.\n"
+          << "Revec:     First narrow call: " << *CI << "\n"
+          << "Revec:     Narrow key: " << static_cast<unsigned>(IID);
+        if (!llvm::Intrinsic::isOverloaded(IID))
+          dbgs() << " name: " << llvm::Intrinsic::getName(IID) << "\n";
+        else
+          dbgs() << " (overloading)\n";
+      );
+
       BS.cancelScheduling(VL, VL0);
       newTreeEntry(VL, false, UserTreeIdx, ReuseShuffleIndices);
       return;
