@@ -1,4 +1,5 @@
 add_llvm_library(LLVMVectorize
+  LoopPreVec.cpp
   LoadStoreVectorizer.cpp
   LoopVectorizationLegality.cpp
   LoopVectorize.cpp

@@ -42,6 +42,7 @@
 #include "llvm/Transforms/Scalar/SimpleLoopUnswitch.h"
 #include "llvm/Transforms/Utils.h"
 #include "llvm/Transforms/Vectorize.h"
+#include "llvm/Transforms/Vectorize/LoopPreVec.h"
 
 using namespace llvm;
 
@@ -411,8 +412,10 @@ void PassManagerBuilder::addFunctionSimplificationPasses(
   if (!RunSLPAfterLoopVectorization) {
     if (SLPVectorize)
       MPM.add(createSLPVectorizerPass()); // Vectorize parallel scalar chains.
-    if (Revectorize)
+    if (Revectorize){
+      MPM.add(createLoopPreVecPass());
       MPM.add(createRevectorizerPass()); // Widen parallel vector intrinsic chains.
+    }
   }
 
   MPM.add(createAggressiveDCEPass());         // Delete dead instructions
@@ -674,8 +677,10 @@ void PassManagerBuilder::populateModulePassManager(
   if (RunSLPAfterLoopVectorization && (SLPVectorize || Revectorize)) {
     if (SLPVectorize)
       MPM.add(createSLPVectorizerPass()); // Vectorize parallel scalar chains.
-    if (Revectorize)
+    if (Revectorize){
+      MPM.add(createLoopPreVecPass());
       MPM.add(createRevectorizerPass()); // Widen parallel vector intrinsic chains.
+    }
     if (OptLevel > 1 && ExtraVectorizerPasses) {
       MPM.add(createEarlyCSEPass());
     }
@@ -883,8 +888,10 @@ void PassManagerBuilder::addLTOOptimizationPasses(legacy::PassManagerBase &PM) {
   if (RunSLPAfterLoopVectorization) {
     if (SLPVectorize)
       PM.add(createSLPVectorizerPass()); // Vectorize parallel scalar chains.
-    if (Revectorize)
+    if (Revectorize){
+      PM.add(createLoopPreVecPass());
       PM.add(createRevectorizerPass()); // Widen parallel vector intrinsic chains.
+    }
   }
 
   // After vectorization, assume intrinsics may tell us more about pointer
