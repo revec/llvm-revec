@@ -7291,9 +7291,9 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
     }
   }
 
-  bool debugP;
+  bool debugP = false;
   PHINode * P = dyn_cast<PHINode>(VL[0]);
-  if(P){
+  LLVM_DEBUG(if(P){
     dbgs() << "[\n";
     for(unsigned i = 0; i < VL.size(); i++){
       dbgs() << *VL[i] << "\n";
@@ -7301,11 +7301,11 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
     dbgs() << "]\n";
     dbgs() << MaxVF << "\n";
     debugP = true;
-  }
+    });
 
   //recalculate the vectorization factor
   unsigned VF = R.getMaxVecRegSize() / Sz;
-  if(P){
+  LLVM_DEBUG(if(P){
     dbgs() << R.getMinVecRegSize() << " " << R.getMaxVecRegSize() << " " << Sz << "\n";
     dbgs() << "vec fac : " << VF << "\n";
 
@@ -7323,7 +7323,7 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
       dbgs() << *outside << "\n";
     }
     
-  }
+    });
 
   bool Changed = false;
   bool CandidateFound = false;
