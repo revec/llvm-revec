@@ -253,14 +253,27 @@ void Reduction::splitReductionNodes(){
     for(User *U : reductionDesc.getLoopExitInstr()->users()){
       Instruction * I = dyn_cast<Instruction>(U);
       if(I && I->getParent() != curBB){
-	Builder.SetInsertPoint(I);
 
-	BasicBlock * outsideParent = I->getParent();
+	BasicBlock * outsideParent = I->getParent();	
+	Instruction * insert = &*outsideParent->begin();
+	Builder.SetInsertPoint(insert);
+
 	dbgs() << "-------before outside------\n";
 	dbgs() << *outsideParent << "\n";
 
-	Instruction * first = reductionChain[0];
-	Instruction * second = reductionChain[1];
+	//create a set of PHI's and then reduce
+	SmallVector<Instruction*, 16> phis;
+
+	for(unsigned i=0; i < reductionChain.size(); i++){
+	  PHINode * preRed = Builder.CreatePHI(reductionChain[i]->getType(),1);
+	  preRed->addIncoming(reductionChain[i],curBB);
+	  phis.push_back(preRed);
+	}
+
+	Instruction * first = phis[0];
+	Instruction * second = phis[1];
+
+	Builder.SetInsertPoint(outsideParent->getFirstNonPHI());
 
 	Value * output;
 	if(!minMax)
@@ -269,17 +282,18 @@ void Reduction::splitReductionNodes(){
 	  output = Builder.CreateICmp(p, first, second);
 	  output = Builder.CreateSelect(output, first, second);
 	}
-	for(unsigned i = 2; i < reductionChain.size(); i++){
+	for(unsigned i = 2; i < phis.size(); i++){
 	  if(!minMax)
-	    output = Builder.CreateBinOp(static_cast<Instruction::BinaryOps>(reductionDesc.getRecurrenceBinOp(RK)), output, reductionChain[i]);
+	    output = Builder.CreateBinOp(static_cast<Instruction::BinaryOps>(reductionDesc.getRecurrenceBinOp(RK)), output, phis[i]);
 	  if(minMax){
-	    Value * cmp = Builder.CreateICmp(p, output, reductionChain[i]);
-	    output = Builder.CreateSelect(cmp, output, reductionChain[i]);
+	    Value * cmp = Builder.CreateICmp(p, output, phis[i]);
+	    output = Builder.CreateSelect(cmp, output, phis[i]);
 	  }
 	}
 	
-	I->replaceUsesOfWith(reductionDesc.getLoopExitInstr(),output);
-	
+	I->replaceAllUsesWith(output);
+	I->eraseFromParent();
+
 	dbgs() << "-------after outside------\n";
 	dbgs() << *outsideParent << "\n";
 	break;
