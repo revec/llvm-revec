@@ -107,7 +107,7 @@ using namespace revectorizer;
 #define SV_NAME "revectorizer"
 #define DEBUG_TYPE "REVEC"
 
-#define DEBUG_REDUCTIONS
+//#define DEBUG_REDUCTIONS
 
 #ifdef DEBUG_REDUCTIONS
 #define REVEC_DEBUG(x) x
@@ -6359,7 +6359,7 @@ public:
     ReducedValueData.clear();
     ReductionRoot = B;
 
-    dbgs() << "vectorizable reductions : " << *B << "\n";
+    LLVM_DEBUG(dbgs() << "vectorizable reductions : " << *B << "\n";);
   
 
     // Post order traverse the reduction tree starting at B. We only handle true
@@ -6368,8 +6368,8 @@ public:
     Stack.push_back(std::make_pair(B, ReductionData.getFirstOperandIndex()));
     ReductionData.initReductionOps(ReductionOps);
 
-    dbgs() << "for ins first: " << *B << "\n";
-    ReductionData.printOpData();
+    LLVM_DEBUG(dbgs() << "for ins first: " << *B << "\n");
+    LLVM_DEBUG(ReductionData.printOpData());
 
     while (!Stack.empty()) {
 
@@ -6385,8 +6385,8 @@ public:
       unsigned EdgeToVist = Stack.back().second++;
       OperationData OpData = getOperationData(TreeN);
 
-      dbgs() << "for ins in loop: " << *TreeN << "\n";
-      OpData.printOpData();
+      LLVM_DEBUG(dbgs() << "for ins in loop: " << *TreeN << "\n");
+      LLVM_DEBUG(OpData.printOpData());
 
       bool IsReducedValue = OpData != ReductionData;
 
@@ -6421,9 +6421,9 @@ public:
 
       // Visit left or right.
       Value *NextV = TreeN->getOperand(EdgeToVist);
-      dbgs() << "NextV" << *NextV << "\n";
+      LLVM_DEBUG(dbgs() << "NextV" << *NextV << "\n";
       if(Phi)
-	dbgs() << "Phi" << *Phi << "\n";
+	dbgs() << "Phi" << *Phi << "\n";);
       if (NextV != Phi) {
         auto *I = dyn_cast<Instruction>(NextV);
         OpData = getOperationData(I);
@@ -6477,10 +6477,10 @@ public:
       markExtraArg(Stack.back(), NextV);
     }
 
-    dbgs() << "printing reduced values: \n";
+    LLVM_DEBUG(dbgs() << "printing reduced values: \n";
     for(unsigned i = 0; i < ReducedVals.size(); i++){
       dbgs() << *ReducedVals[i] << "\n";
-    }
+    });
 
 
     return true;
@@ -6523,8 +6523,8 @@ public:
     while (i < NumReducedVals - ReduxWidth + 1 && ReduxWidth >= 2) { //equal added by me
       auto VL = makeArrayRef(&ReducedVals[i], ReduxWidth);
      
-      dbgs() << "before buildTree\n";
-      printBundle(VL);
+      LLVM_DEBUG(dbgs() << "before buildTree\n";
+		 printBundle(VL));
 
       V.EnableDebug = true;
       V.buildTree(VL, ExternallyUsedValues, IgnoreList);
@@ -6541,7 +6541,7 @@ public:
       }
 
 
-      dbgs() << "tree size: " << V.getTreeSize() << "\n";
+      LLVM_DEBUG(dbgs() << "tree size: " << V.getTreeSize() << "\n");
 
 
       if (V.isTreeTinyAndNotFullyVectorizable())
@@ -7139,8 +7139,8 @@ bool RevectorizerPass::vectorizeChainsInBlock(BasicBlock *BB, BoUpSLP &R) {
       //get the reduction value first
       Value * RedVal = getReductionValue(DT, P, BB, LI);
 
-      if(RedVal)
-	REVEC_DEBUG(dbgs() << "reduction : " << *P << "\n" << *RedVal << "\n");
+      LLVM_DEBUG(if(RedVal)
+	 REVEC_DEBUG(dbgs() << "reduction : " << *P << "\n" << *RedVal << "\n"));
 
       // Try to match and vectorize a horizontal reduction.
       if (vectorizeRootInstruction(P, RedVal, BB, R,

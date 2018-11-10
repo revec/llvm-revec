@@ -252,6 +252,7 @@ bool RecurrenceDescriptor::AddReductionVar(PHINode *Phi, RecurrenceKind Kind,
   Worklist.push_back(Start);
   VisitedInsts.insert(Start);
 
+ 
   // A value in the reduction can be used:
   //  - By the reduction:
   //      - Reduction operation:
@@ -270,6 +271,8 @@ bool RecurrenceDescriptor::AddReductionVar(PHINode *Phi, RecurrenceKind Kind,
   while (!Worklist.empty()) {
     Instruction *Cur = Worklist.back();
     Worklist.pop_back();
+
+
 
     // No Users.
     // If the instruction has no users then this is a broken chain and can't be
@@ -295,8 +298,9 @@ bool RecurrenceDescriptor::AddReductionVar(PHINode *Phi, RecurrenceKind Kind,
     // type-promoted).
     if (Cur != Start) {
       ReduxDesc = isRecurrenceInstr(Cur, Kind, ReduxDesc, HasFunNoNaNAttr);
-      if (!ReduxDesc.isRecurrence())
+      if (!ReduxDesc.isRecurrence()){
         return false;
+      }
     }
 
     // A reduction operation must only have one use of the reduction value.
@@ -362,8 +366,9 @@ bool RecurrenceDescriptor::AddReductionVar(PHINode *Phi, RecurrenceKind Kind,
       } else if (!isa<PHINode>(UI) &&
                  ((!isa<FCmpInst>(UI) && !isa<ICmpInst>(UI) &&
                    !isa<SelectInst>(UI)) ||
-                  !isMinMaxSelectCmpPattern(UI, IgnoredVal).isRecurrence()))
-        return false;
+                  !isMinMaxSelectCmpPattern(UI, IgnoredVal).isRecurrence())){
+	return false;
+      }
 
       // Remember that we completed the cycle.
       if (UI == Phi)
@@ -373,11 +378,22 @@ bool RecurrenceDescriptor::AddReductionVar(PHINode *Phi, RecurrenceKind Kind,
     Worklist.append(NonPHIs.begin(), NonPHIs.end());
   }
 
+  LLVM_DEBUG(dbgs() << "stack process done\n";
+  dbgs() << "num comp : " << NumCmpSelectPatternInst << "\n";
+  dbgs() << "exit instruction : " << *ExitInstruction << "\n";
+
+  dbgs() << "users :";
+  for(User *U : ExitInstruction->users()){
+    dbgs() << *U << "\n";
+  });
+
+
   // This means we have seen one but not the other instruction of the
   // pattern or more than just a select and cmp.
   if ((Kind == RK_IntegerMinMax || Kind == RK_FloatMinMax) &&
-      NumCmpSelectPatternInst != 2)
+      NumCmpSelectPatternInst % 2 == 1){   //BUG fixed
     return false;
+  }
 
   if (!FoundStartPHI || !FoundReduxOp || !ExitInstruction)
     return false;

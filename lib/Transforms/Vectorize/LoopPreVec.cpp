@@ -66,13 +66,305 @@
 using namespace llvm;
 
 #define DEBUG_TYPE "loop-prevec"
+
+
+void LoopPreVecPass::printLoop(){
+
+  //loop preheader
+  auto preHeader = L->getLoopPreheader();   
+  if(preHeader){
+    dbgs() << "-----preheader-----\n";
+    dbgs() << *preHeader << "\n";
+  }
+
+  //loop header
+  auto header = L->getHeader();   
+  if(header){
+    dbgs() << "-----header-----\n";
+    dbgs() << *header << "\n";
+  }
   
+  //loop latch
+  auto latch = L->getLoopLatch();   
+  if(latch){
+    dbgs() << "-----latch-----\n";
+    dbgs() << *latch << "\n";
+  }
+
+  //loop exit
+  auto exit = L->getExitBlock();   
+  if(exit){
+    dbgs() << "-----exit-----\n";
+    dbgs() << *exit << "\n";
+  }
+  
+}
+
+namespace llvm{
+
+  class Reduction{
+  
+
+    public:
+
+    Reduction(PHINode * p, RecurrenceDescriptor rd){
+      phi = p;
+      reductionDesc = rd;
+    }
+    
+    PHINode * phi;
+    RecurrenceDescriptor reductionDesc;
+    SmallVector<Instruction*, 32> reductionChain;
+
+    void splitReductionNodes();
+    void createReductionChain();
+    void printReductionChain();
+
+  };
+};
+
+void Reduction::createReductionChain(){
+
+  Instruction * I = phi;
+  BasicBlock * ParentBB = phi->getParent();
+
+
+  while(true){
+    
+    for(User *U : I->users()){
+      
+      if(!isa<Instruction>(U)) continue;
+
+      Instruction *UI = dyn_cast<Instruction>(U);
+
+      if(UI->getType() == reductionDesc.getRecurrenceType() && UI->getParent() == ParentBB){
+	I = UI;
+	reductionChain.push_back(I);
+	break;
+      }
+    }
+
+    if(I == reductionDesc.getLoopExitInstr())
+      break;
+  
+  }
+
+
+}
+
+
+void Reduction::printReductionChain(){
+
+  dbgs() << *reductionDesc.getRecurrenceType() << "\n";
+  dbgs() << "[";
+  for(unsigned i = 0; i < reductionChain.size(); i++){
+    dbgs() << *reductionChain[i] << "\n";
+  }
+  dbgs() << "]\n";
+
+}
+
+
+void Reduction::splitReductionNodes(){
+
+  if(reductionChain.size() < 2) return;
+
+  dbgs() << "-----before change----\n";
+  dbgs() << *phi->getParent() << "\n";
+
+  BasicBlock *curBB = phi->getParent();
+
+  IRBuilder<> Builder(curBB);
+  Builder.SetInsertPoint(phi);
+
+  //exactly two values coming for the phi node
+  assert(phi->getNumIncomingValues() == 2);
+
+  Value * outsideValue;
+  BasicBlock * outsideBB;
+
+  for(unsigned i = 0; i < phi->getNumIncomingValues(); i++){
+    BasicBlock * IBB = phi->getIncomingBlock(i);
+    if(IBB != curBB){
+      outsideBB = IBB;
+      outsideValue = phi->getIncomingValueForBlock(IBB);
+    }
+    else{
+      assert(phi->getIncomingValueForBlock(IBB) == reductionDesc.getLoopExitInstr());
+    }
+
+  }
+
+  //create PHINodes for each node
+  RecurrenceDescriptor::RecurrenceKind RK = reductionDesc.getRecurrenceKind();
+  
+
+  bool minMax = false;
+  ICmpInst::Predicate p;
+
+  if(reductionDesc.isIntegerRecurrenceKind(RK)){
+    
+    for(unsigned i = 0; i < reductionChain.size(); i++){
+      
+      Instruction * I = reductionChain[i];
+      PHINode * newPhi = Builder.CreatePHI(phi->getType(), phi->getNumIncomingValues());      
+      newPhi->addIncoming(outsideValue, outsideBB);
+      newPhi->addIncoming(I, curBB);
+
+      //replace definitions
+      if(i == 0){
+	I->replaceUsesOfWith(phi,newPhi);
+      }
+      else{
+	I->replaceUsesOfWith(reductionChain[i-1],newPhi);
+      }
+
+      //if it is a select statement
+      if(SelectInst * SI = dyn_cast<SelectInst>(I)){
+	minMax = true;
+	
+	//get the compare instruction
+	ICmpInst * ICmp = dyn_cast<ICmpInst>(SI->getCondition());
+	if(ICmp){
+	  p = ICmp->getPredicate();
+	  if(i == 0){
+	    ICmp->replaceUsesOfWith(phi,newPhi);
+	  }
+	  else{
+	    ICmp->replaceUsesOfWith(reductionChain[i-1],newPhi);
+	  }
+	}
+      }
+   
+    }
+
+
+    dbgs() << "use empty: " << phi->use_empty() << "\n";
+
+    //remove the phi instruction
+    if(phi->use_empty()){
+      phi->eraseFromParent();
+    }
+
+    dbgs() << "---------after change-------\n";
+    dbgs() << *curBB << "\n";
+
+    //now do the reduction
+    for(User *U : reductionDesc.getLoopExitInstr()->users()){
+      Instruction * I = dyn_cast<Instruction>(U);
+      if(I && I->getParent() != curBB){
+	Builder.SetInsertPoint(I);
+
+	BasicBlock * outsideParent = I->getParent();
+	dbgs() << "-------before outside------\n";
+	dbgs() << *outsideParent << "\n";
+
+	Instruction * first = reductionChain[0];
+	Instruction * second = reductionChain[1];
+
+	Value * output;
+	if(!minMax)
+	  output = Builder.CreateBinOp(static_cast<Instruction::BinaryOps>(reductionDesc.getRecurrenceBinOp(RK)), first, second);
+	if(minMax){
+	  output = Builder.CreateICmp(p, first, second);
+	  output = Builder.CreateSelect(output, first, second);
+	}
+	for(unsigned i = 2; i < reductionChain.size(); i++){
+	  if(!minMax)
+	    output = Builder.CreateBinOp(static_cast<Instruction::BinaryOps>(reductionDesc.getRecurrenceBinOp(RK)), output, reductionChain[i]);
+	  if(minMax){
+	    Value * cmp = Builder.CreateICmp(p, output, reductionChain[i]);
+	    output = Builder.CreateSelect(cmp, output, reductionChain[i]);
+	  }
+	}
+	
+	I->replaceUsesOfWith(reductionDesc.getLoopExitInstr(),output);
+	
+	dbgs() << "-------after outside------\n";
+	dbgs() << *outsideParent << "\n";
+	break;
+
+      }
+    }
+
+  }
+
+
+
+}
+
+
+void LoopPreVecPass::identifyReductionPHI(){
+
+  auto blocks = L->getBlocksVector();
+
+  SmallVector<Reduction* , 4> reductions;
+
+  for(auto it = blocks.begin(); it != blocks.end(); it++){
+  
+    BasicBlock * BB = *it;
+
+    for(Instruction &I: *BB){
+      if(PHINode * phi = dyn_cast<PHINode>(&I)){
+	RecurrenceDescriptor RedDes;
+	if(RecurrenceDescriptor::isReductionPHI(phi, L, RedDes, nullptr, AC, DT)){
+	  reductions.push_back(new Reduction(phi, RedDes));
+	}
+      } 
+    }    
+  }
+
+  
+
+  for(unsigned i = 0; i < reductions.size(); i++){
+    reductions[i]->createReductionChain();
+    reductions[i]->printReductionChain();
+    reductions[i]->splitReductionNodes();
+    delete reductions[i];
+  }
+
+  
+
+}
+  
+
+bool LoopPreVecPass::runImpl(Loop * L_, ScalarEvolution *SE_, TargetTransformInfo *TTI_,
+			     LoopInfo *LI_ , DominatorTree *DT_, AssumptionCache *AC_){
+
+
+  L = L_;
+  SE = SE_;
+  TTI = TTI_;
+  LI = LI_;
+  DT = DT_;
+  AC = AC_;
+
+  bool Changed = false;
+
+  bool isSimple = L->isLoopSimplifyForm();
+  bool isLCSSA = L->isLCSSAForm(*DT);
+  
+  auto innerLoops = L->getSubLoops();
+
+  if(innerLoops.size() == 0){
+    dbgs() << "found inner loop - " << L->getName() << " " << isSimple << " " << isLCSSA << "\n";
+    //L->print(dbgs(), 0, true);
+    identifyReductionPHI();
+  }
+
+
+  return Changed;
+
+}
+
 
 namespace {
 
 class LoopPreVec : public LoopPass {
 public:
   static char ID; // Pass ID, replacement for typeid
+
+  LoopPreVecPass LPass;
 
   LoopPreVec()
       : LoopPass(ID) {
@@ -86,16 +378,14 @@ public:
     Function &F = *L->getHeader()->getParent();
 
     auto &DT = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
-    LoopInfo *LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
+    LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
     ScalarEvolution &SE = getAnalysis<ScalarEvolutionWrapperPass>().getSE();
-    const TargetTransformInfo &TTI =
+    TargetTransformInfo &TTI =
         getAnalysis<TargetTransformInfoWrapperPass>().getTTI(F);
     auto &AC = getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F);
-    bool PreserveLCSSA = mustPreserveAnalysisID(LCSSAID);
+    //bool PreserveLCSSA = mustPreserveAnalysisID(LCSSAID);
 
-    dbgs() << "loop pre vec pass\n";
-
-    return false;
+    return LPass.runImpl(L, &SE, &TTI, &LI, &DT, &AC);
     
   }
 
@@ -108,6 +398,11 @@ public:
     // recreate dom info if anything gets unrolled.
     getLoopAnalysisUsage(AU);
   }
+
+private:
+  
+  void printLoop(Loop * L);
+
 
 };
 
