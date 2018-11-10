@@ -42,7 +42,7 @@ public:
 private:
 
   void printLoop();
-  void identifyReductionPHI();
+  bool identifyReductionPHI();
 
 
   

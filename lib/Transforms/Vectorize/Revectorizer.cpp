@@ -3061,8 +3061,7 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       for (Value *val : VL) {
           LLVM_DEBUG(dbgs() << "Revec:   " << *val << "\n");
       }
-
-      return ReuseShuffleCost + FusedVecCallCost - NarrowVecCallCost;
+      return ReuseShuffleCost - 1;
     }
     case Instruction::ShuffleVector: {
       int ReuseShuffleCost = 0;
@@ -5489,14 +5488,14 @@ bool RevectorizerPass::runImpl(Function &F, ScalarEvolution *SE_,
 
   // Scan the blocks in the function in post order.
   for (auto BB : post_order(&F.getEntryBlock())) {
-    //collectSeedInstructions(BB, R);
+    collectSeedInstructions(BB, R);
 
     // Vectorize trees that end at stores.
-    //if (!Stores.empty()) {
-    //  LLVM_DEBUG(dbgs() << "Revec: Found stores for " << Stores.size()
-    //               << " underlying objects.\n");
-    //  Changed |= vectorizeStoreChains(R);
-    //}
+    if (!Stores.empty()) {
+      LLVM_DEBUG(dbgs() << "Revec: Found stores for " << Stores.size()
+                   << " underlying objects.\n");
+      Changed |= vectorizeStoreChains(R);
+    }
 
     // Vectorize trees that end at reductions.
     Changed |= vectorizeChainsInBlock(BB, R);
@@ -7052,6 +7051,7 @@ bool RevectorizerPass::vectorizeChainsInBlock(BasicBlock *BB, BoUpSLP &R) {
   SmallPtrSet<Value *, 16> VisitedInstrs;
 
   bool HaveVectorizedPhiNodes = true;
+
   while (HaveVectorizedPhiNodes) {
     HaveVectorizedPhiNodes = false;
 
@@ -7091,19 +7091,21 @@ bool RevectorizerPass::vectorizeChainsInBlock(BasicBlock *BB, BoUpSLP &R) {
       // is done when there are exactly two elements since tryToVectorizeList
       // asserts that there are only two values when AllowReorder is true.
       bool AllowReorder = NumElts == 2;
-      //if (NumElts > 1 && tryToVectorizeList(makeArrayRef(IncIt, NumElts), R,
-      //                                      /*UserCost=*/0, AllowReorder)) {
-      //  // Success start over because instructions might have been changed.
-      //  HaveVectorizedPhiNodes = true;
-      //  Changed = true;
-      //  break;
-      //}
+      if (NumElts > 1 && tryToVectorizeList(makeArrayRef(IncIt, NumElts), R,
+                                            /*UserCost=*/0, AllowReorder)) {
+        // Success start over because instructions might have been changed.
+        HaveVectorizedPhiNodes = true;
+        Changed = true;
+        break;
+      }
 
       // Start over at the next instruction of a different type (or the end).
       IncIt = SameTypeIt;
     }
   }
 
+  return Changed;
+  
   //upto PHI-Nodes it's revectorizing
 
   VisitedInstrs.clear();
@@ -7292,9 +7294,35 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
   bool debugP;
   PHINode * P = dyn_cast<PHINode>(VL[0]);
   if(P){
-    dbgs() << *VL[0] << "\n";
+    dbgs() << "[\n";
+    for(unsigned i = 0; i < VL.size(); i++){
+      dbgs() << *VL[i] << "\n";
+    }
+    dbgs() << "]\n";
     dbgs() << MaxVF << "\n";
     debugP = true;
+  }
+
+  //recalculate the vectorization factor
+  unsigned VF = R.getMaxVecRegSize() / Sz;
+  if(P){
+    dbgs() << R.getMinVecRegSize() << " " << R.getMaxVecRegSize() << " " << Sz << "\n";
+    dbgs() << "vec fac : " << VF << "\n";
+
+    BasicBlock * curBB = P->getParent();
+    BasicBlock * outside = nullptr;
+    
+    for(unsigned i = 0; i < P->getNumIncomingValues(); i++){
+      BasicBlock * IBB = P->getIncomingBlock(i);
+      if(IBB != curBB){
+	outside = IBB;
+      }
+    }
+
+    if(outside){
+      dbgs() << *outside << "\n";
+    }
+    
   }
 
   bool Changed = false;
@@ -7305,74 +7333,69 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
   SmallVector<WeakTrackingVH, 8> TrackValues(VL.begin(), VL.end());
 
   unsigned NextInst = 0, MaxInst = VL.size();
-  for (unsigned VF = MaxVF; NextInst + 1 < MaxInst && VF >= MinVF;
-       VF /= 2) {
-    // No actual vectorization should happen, if number of parts is the same as
-    // provided vectorization factor (i.e. the scalar type is used for vector
-    // code during codegen).
+  for(unsigned NextInst = 0; NextInst < MaxInst; NextInst += VF){
+    
     auto *VecTy = getVectorType(VL[0]->getType(), VF);
     if (TTI->getNumberOfParts(VecTy) == VF)
       continue;
-    for (unsigned I = NextInst; I < MaxInst; ++I) {
-      unsigned OpsWidth = 0;
+    unsigned OpsWidth = 0;
 
-      if (I + VF > MaxInst)
-        OpsWidth = MaxInst - I;
-      else
-        OpsWidth = VF;
+    if (NextInst + VF > MaxInst)
+      OpsWidth = MaxInst - NextInst;
+    else
+      OpsWidth = VF;
 
-      if (!isPowerOf2_32(OpsWidth) || OpsWidth < 2)
-        break;
+    if (!isPowerOf2_32(OpsWidth) || OpsWidth < 2)
+      break;
 
-      // Check that a previous iteration of this loop did not delete the Value.
-      if (hasValueBeenRAUWed(VL, TrackValues, I, OpsWidth))
-        continue;
+    // Check that a previous iteration of this loop did not delete the Value.
+    if (hasValueBeenRAUWed(VL, TrackValues, NextInst, OpsWidth))
+      continue;
 
+    if(debugP)
+      REVEC_DEBUG(dbgs() << "Revec: Analyzing " << OpsWidth << " operations "
+		  << "\n");
+    ArrayRef<Value *> Ops = VL.slice(NextInst, OpsWidth);
+
+    R.buildTree(Ops);
+    Optional<ArrayRef<unsigned>> Order = R.bestOrder();
+    // TODO: check if we can allow reordering for more cases.
+    if (AllowReorder && Order) {
+      // TODO: reorder tree nodes without tree rebuilding.
+      // Conceptually, there is nothing actually preventing us from trying to
+      // reorder a larger list. In fact, we do exactly this when vectorizing
+      // reductions. However, at this point, we only expect to get here when
+      // there are exactly two operations.
+      assert(Ops.size() == 2);
+      Value *ReorderedOps[] = {Ops[1], Ops[0]};
+      R.buildTree(ReorderedOps, None);
+    }
+    if (R.isTreeTinyAndNotFullyVectorizable())
+      continue;
+    
+    //COMMENT
+    //R.computeMinimumValueSizes();
+    
+    int Cost = R.getTreeCost() - UserCost;
+    CandidateFound = true;
+    MinCost = std::min(MinCost, Cost);
+
+    RevecCostThreshold = -10;
+    if (Cost < -RevecCostThreshold) {
       if(debugP)
-	REVEC_DEBUG(dbgs() << "Revec: Analyzing " << OpsWidth << " operations "
-		    << "\n");
-      ArrayRef<Value *> Ops = VL.slice(I, OpsWidth);
-
-      R.buildTree(Ops);
-      Optional<ArrayRef<unsigned>> Order = R.bestOrder();
-      // TODO: check if we can allow reordering for more cases.
-      if (AllowReorder && Order) {
-        // TODO: reorder tree nodes without tree rebuilding.
-        // Conceptually, there is nothing actually preventing us from trying to
-        // reorder a larger list. In fact, we do exactly this when vectorizing
-        // reductions. However, at this point, we only expect to get here when
-        // there are exactly two operations.
-        assert(Ops.size() == 2);
-        Value *ReorderedOps[] = {Ops[1], Ops[0]};
-        R.buildTree(ReorderedOps, None);
-      }
-      if (R.isTreeTinyAndNotFullyVectorizable())
-        continue;
-
-      //COMMENT
-      //R.computeMinimumValueSizes();
-
-      int Cost = R.getTreeCost() - UserCost;
-      CandidateFound = true;
-      MinCost = std::min(MinCost, Cost);
-
-      if (Cost < -RevecCostThreshold) {
-        if(debugP)
-	  REVEC_DEBUG(dbgs() << "Revec: Vectorizing list at cost:" << Cost << ".\n");
-        R.getORE()->emit(OptimizationRemark(SV_NAME, "VectorizedList",
-                                                    cast<Instruction>(Ops[0]))
-                                 << "SLP vectorized with cost " << ore::NV("Cost", Cost)
-                                 << " and with tree size "
-                                 << ore::NV("TreeSize", R.getTreeSize()));
-
-        R.vectorizeTree();
-        // Move to the next bundle.
-        I += VF - 1;
-        NextInst = I + 1;
-        Changed = true;
-      }
+	REVEC_DEBUG(dbgs() << "Revec: Vectorizing list at cost:" << Cost << ".\n");
+      R.getORE()->emit(OptimizationRemark(SV_NAME, "VectorizedList",
+					  cast<Instruction>(Ops[0]))
+		       << "SLP vectorized with cost " << ore::NV("Cost", Cost)
+		       << " and with tree size "
+		       << ore::NV("TreeSize", R.getTreeSize()));
+      
+      R.vectorizeTree();
+      // Move to the next bundle.
+      Changed = true;
     }
   }
+
 
   if (!Changed && CandidateFound) {
     R.getORE()->emit([&]() {

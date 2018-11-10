@@ -169,8 +169,8 @@ void Reduction::splitReductionNodes(){
 
   if(reductionChain.size() < 2) return;
 
-  dbgs() << "-----before change----\n";
-  dbgs() << *phi->getParent() << "\n";
+  LLVM_DEBUG(dbgs() << "-----before change----\n";
+	     dbgs() << *phi->getParent() << "\n";);
 
   BasicBlock *curBB = phi->getParent();
 
@@ -239,15 +239,15 @@ void Reduction::splitReductionNodes(){
     }
 
 
-    dbgs() << "use empty: " << phi->use_empty() << "\n";
+    LLVM_DEBUG(dbgs() << "use empty: " << phi->use_empty() << "\n";);
 
     //remove the phi instruction
     if(phi->use_empty()){
       phi->eraseFromParent();
     }
 
-    dbgs() << "---------after change-------\n";
-    dbgs() << *curBB << "\n";
+    LLVM_DEBUG(dbgs() << "---------after change-------\n";
+	       dbgs() << *curBB << "\n";);
 
     //now do the reduction
     for(User *U : reductionDesc.getLoopExitInstr()->users()){
@@ -258,8 +258,8 @@ void Reduction::splitReductionNodes(){
 	Instruction * insert = &*outsideParent->begin();
 	Builder.SetInsertPoint(insert);
 
-	dbgs() << "-------before outside------\n";
-	dbgs() << *outsideParent << "\n";
+	LLVM_DEBUG(dbgs() << "-------before outside------\n";
+		   dbgs() << *outsideParent << "\n";);
 
 	//create a set of PHI's and then reduce
 	SmallVector<Instruction*, 16> phis;
@@ -294,8 +294,8 @@ void Reduction::splitReductionNodes(){
 	I->replaceAllUsesWith(output);
 	I->eraseFromParent();
 
-	dbgs() << "-------after outside------\n";
-	dbgs() << *outsideParent << "\n";
+	LLVM_DEBUG(dbgs() << "-------after outside------\n";
+		   dbgs() << *outsideParent << "\n";);
 	break;
 
       }
@@ -308,7 +308,7 @@ void Reduction::splitReductionNodes(){
 }
 
 
-void LoopPreVecPass::identifyReductionPHI(){
+bool LoopPreVecPass::identifyReductionPHI(){
 
   auto blocks = L->getBlocksVector();
 
@@ -328,15 +328,17 @@ void LoopPreVecPass::identifyReductionPHI(){
     }    
   }
 
+  bool Changed = reductions.size() > 0;
   
 
   for(unsigned i = 0; i < reductions.size(); i++){
     reductions[i]->createReductionChain();
-    reductions[i]->printReductionChain();
+    LLVM_DEBUG(reductions[i]->printReductionChain(););
     reductions[i]->splitReductionNodes();
     delete reductions[i];
   }
 
+  return Changed;
   
 
 }
@@ -361,9 +363,9 @@ bool LoopPreVecPass::runImpl(Loop * L_, ScalarEvolution *SE_, TargetTransformInf
   auto innerLoops = L->getSubLoops();
 
   if(innerLoops.size() == 0){
-    dbgs() << "found inner loop - " << L->getName() << " " << isSimple << " " << isLCSSA << "\n";
+    LLVM_DEBUG(dbgs() << "found inner loop - " << L->getName() << " " << isSimple << " " << isLCSSA << "\n";);
     //L->print(dbgs(), 0, true);
-    identifyReductionPHI();
+    Changed = identifyReductionPHI();
   }
 
 
