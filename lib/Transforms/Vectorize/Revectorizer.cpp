@@ -231,6 +231,16 @@ static std::pair<int, Intrinsic::ID> getWidenedIntrinsic(Intrinsic::ID IID, int 
   return std::make_pair(-1, Intrinsic::not_intrinsic);
 }
 
+/// \returns an operand index that should remain narrow.
+static Optional<unsigned> getPreservedOperand(Intrinsic::ID IID) {
+  unsigned base = static_cast<unsigned>(IID);
+  if (preservedOperandMap.count(base))
+    return Optional<unsigned>(preservedOperandMap[base]);
+
+  return Optional<unsigned>();
+}
+
+
 /// \returns true if all of the instructions in \p VL are in the same block or
 /// false otherwise.
 static bool allSameBlock(ArrayRef<Value *> VL) {
@@ -2350,7 +2360,12 @@ void BoUpSLP::buildTree_rec(ArrayRef<Value *> VL, unsigned Depth,
 
         newTreeEntry(VL, true, UserTreeIdx, ReuseShuffleIndices);
 
+        Optional<unsigned> preservedOperand = getPreservedOperand(IID);
+
         for (unsigned i = 0, e = CI->getNumArgOperands(); i != e; ++i) {
+          if (preservedOperand.hasValue() && i == preservedOperand.getValue())
+            continue;
+
           ValueList Operands;
           // Prepare the operand vector.
           for (Value *val : VL) {
@@ -3012,16 +3027,23 @@ int BoUpSLP::getEntryCost(TreeEntry *E) {
       assert(alt != Intrinsic::not_intrinsic && VF > 0 && "Attempting to compute cost of intrinsic call entry, but no wide equivalence found.");
       assert(VF == static_cast<long>(VL.size()) && "Cannot bundle intrinsic calls, where known widening factor does not match bundle size.");
 
+      Optional<unsigned> preservedOperand = getPreservedOperand(IID);
+
       // Find widened vector return type
       Type *wideReturnTy = getVectorType(CI->getType(), VL.size());
 
       // Find widened vector argument types
       SmallVector<Type *, 4> WideArgTys;
       for (unsigned op = 0, opc = CI->getNumArgOperands(); op != opc; ++op) {
-        // Assume vertical concatenation of arguments in this bundle
         Type *narrowArgTy = CI->getArgOperand(op)->getType();
-        Type *wideArgTy = getVectorType(narrowArgTy, VL.size());
-        WideArgTys.push_back(wideArgTy);
+
+        if (preservedOperand.hasValue() && op == preservedOperand.getValue()) {
+          WideArgTys.push_back(narrowArgTy);
+        } else {
+          // Assume vertical concatenation of arguments in this bundle
+          Type *wideArgTy = getVectorType(narrowArgTy, VL.size());
+          WideArgTys.push_back(wideArgTy);
+        }
       }
 
       int FusedVecCallCost =
@@ -4332,16 +4354,24 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
 												<< (llvm::Intrinsic::isOverloaded(alt) ? std::to_string(alt) : llvm::Intrinsic::getName(alt).str())
 												<< " widening factor: " << VF << ".\n");
 
+      Optional<unsigned> preservedOperand = getPreservedOperand(IID);
+
       ValueList args;
       for (unsigned i = 0, e = CI->getNumArgOperands(); i != e; ++i) {
-        // Prepare a vertical operand vector.
-        ValueList Operands;
-        for (Value *val : E->Scalars) {
-          CallInst *CI2 = dyn_cast<CallInst>(val);
-          Operands.push_back(CI2->getArgOperand(i));
+        Value *arg;
+
+        if (preservedOperand.hasValue() && preservedOperand.getValue() == i) {
+          arg = CI->getArgOperand(i);
+        } else {
+          // Prepare a vertical operand vector.
+          ValueList Operands;
+          for (Value *val : E->Scalars) {
+            CallInst *CI2 = dyn_cast<CallInst>(val);
+            Operands.push_back(CI2->getArgOperand(i));
+          }
+          arg = vectorizeTree(Operands);
         }
 
-        Value *arg = vectorizeTree(Operands);
         LLVM_DEBUG(dbgs() << "Revec: Call wide arg " << i << " = " << *arg << "\n");
         args.push_back(arg);
       }

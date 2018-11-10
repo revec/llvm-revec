@@ -27,6 +27,10 @@ typedef std::pair<int, Intrinsic::ID> WideningTarget;
 
 static SmallDenseMap<unsigned, std::vector<WideningTarget>> intrinsicWideningMap;
 
+/// Maps intrinsics to an operand index i if op_i should be the kept the same and not widened
+//  (i.e. take op_i of the first narrow vector)
+static SmallDenseMap<unsigned, unsigned> preservedOperandMap;
+
 static void initializeIntrinsicWideningMap() {
     intrinsicWideningMap.try_emplace(Intrinsic::x86_avx2_packssdw, std::vector<WideningTarget>({
         { 2, Intrinsic::x86_avx512_packssdw_512}}));
@@ -281,6 +285,15 @@ static void initializeIntrinsicWideningMap() {
         { 2, Intrinsic::x86_avx2_psign_d}}));
     intrinsicWideningMap.try_emplace(Intrinsic::x86_ssse3_psign_w_128, std::vector<WideningTarget>({
         { 2, Intrinsic::x86_avx2_psign_w}}));
+
+    preservedOperandMap.try_emplace(Intrinsic::x86_sse2_psra_d, 1);
+    preservedOperandMap.try_emplace(Intrinsic::x86_sse2_psra_w, 1);
+    preservedOperandMap.try_emplace(Intrinsic::x86_sse2_psrl_d, 1);
+    preservedOperandMap.try_emplace(Intrinsic::x86_sse2_psrl_w, 1);
+    preservedOperandMap.try_emplace(Intrinsic::x86_sse2_psrl_q, 1);
+    preservedOperandMap.try_emplace(Intrinsic::x86_sse2_psll_d, 1);
+    preservedOperandMap.try_emplace(Intrinsic::x86_sse2_psll_w, 1);
+    preservedOperandMap.try_emplace(Intrinsic::x86_sse2_psll_q, 1);
 }
 
 } // end namespace revectorizer
