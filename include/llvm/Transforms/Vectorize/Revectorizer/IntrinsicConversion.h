@@ -27,6 +27,10 @@ typedef std::pair<int, Intrinsic::ID> WideningTarget;
 
 static SmallDenseMap<unsigned, std::vector<WideningTarget>> intrinsicWideningMap;
 
+/// Maps intrinsics to an operand index i if op_i should be the kept the same and not widened
+//  (i.e. take op_i of the first narrow vector)
+static SmallDenseMap<unsigned, unsigned> preservedOperandMap;
+
 static void initializeIntrinsicWideningMap() {
     intrinsicWideningMap.try_emplace(Intrinsic::x86_avx2_packssdw, std::vector<WideningTarget>({
         { 2, Intrinsic::x86_avx512_packssdw_512}}));
@@ -254,6 +258,42 @@ static void initializeIntrinsicWideningMap() {
         { 2, Intrinsic::x86_avx_rcp_ps_256}}));
     intrinsicWideningMap.try_emplace(Intrinsic::x86_sse_rsqrt_ps, std::vector<WideningTarget>({
         { 2, Intrinsic::x86_avx_rsqrt_ps_256}}));
+    intrinsicWideningMap.try_emplace(Intrinsic::x86_ssse3_phadd_d_128, std::vector<WideningTarget>({
+        { 2, Intrinsic::x86_avx2_phadd_d}}));
+    intrinsicWideningMap.try_emplace(Intrinsic::x86_ssse3_phadd_sw_128, std::vector<WideningTarget>({
+        { 2, Intrinsic::x86_avx2_phadd_sw}}));
+    intrinsicWideningMap.try_emplace(Intrinsic::x86_ssse3_phadd_w_128, std::vector<WideningTarget>({
+        { 2, Intrinsic::x86_avx2_phadd_w}}));
+    intrinsicWideningMap.try_emplace(Intrinsic::x86_ssse3_phsub_d_128, std::vector<WideningTarget>({
+        { 2, Intrinsic::x86_avx2_phsub_d}}));
+    intrinsicWideningMap.try_emplace(Intrinsic::x86_ssse3_phsub_sw_128, std::vector<WideningTarget>({
+        { 2, Intrinsic::x86_avx2_phsub_sw}}));
+    intrinsicWideningMap.try_emplace(Intrinsic::x86_ssse3_phsub_w_128, std::vector<WideningTarget>({
+        { 2, Intrinsic::x86_avx2_phsub_w}}));
+    intrinsicWideningMap.try_emplace(Intrinsic::x86_ssse3_pmadd_ub_sw_128, std::vector<WideningTarget>({
+        { 2, Intrinsic::x86_avx2_pmadd_ub_sw},
+        { 4, Intrinsic::x86_avx512_pmaddubs_w_512}}));
+    intrinsicWideningMap.try_emplace(Intrinsic::x86_ssse3_pmul_hr_sw_128, std::vector<WideningTarget>({
+        { 2, Intrinsic::x86_avx2_pmul_hr_sw},
+        { 4, Intrinsic::x86_avx512_pmul_hr_sw_512}}));
+    intrinsicWideningMap.try_emplace(Intrinsic::x86_ssse3_pshuf_b_128, std::vector<WideningTarget>({
+        { 2, Intrinsic::x86_avx2_pshuf_b},
+        { 4, Intrinsic::x86_avx512_pshuf_b_512}}));
+    intrinsicWideningMap.try_emplace(Intrinsic::x86_ssse3_psign_b_128, std::vector<WideningTarget>({
+        { 2, Intrinsic::x86_avx2_psign_b}}));
+    intrinsicWideningMap.try_emplace(Intrinsic::x86_ssse3_psign_d_128, std::vector<WideningTarget>({
+        { 2, Intrinsic::x86_avx2_psign_d}}));
+    intrinsicWideningMap.try_emplace(Intrinsic::x86_ssse3_psign_w_128, std::vector<WideningTarget>({
+        { 2, Intrinsic::x86_avx2_psign_w}}));
+
+    preservedOperandMap.try_emplace(Intrinsic::x86_sse2_psra_d, 1);
+    preservedOperandMap.try_emplace(Intrinsic::x86_sse2_psra_w, 1);
+    preservedOperandMap.try_emplace(Intrinsic::x86_sse2_psrl_d, 1);
+    preservedOperandMap.try_emplace(Intrinsic::x86_sse2_psrl_w, 1);
+    preservedOperandMap.try_emplace(Intrinsic::x86_sse2_psrl_q, 1);
+    preservedOperandMap.try_emplace(Intrinsic::x86_sse2_psll_d, 1);
+    preservedOperandMap.try_emplace(Intrinsic::x86_sse2_psll_w, 1);
+    preservedOperandMap.try_emplace(Intrinsic::x86_sse2_psll_q, 1);
 }
 
 } // end namespace revectorizer
