@@ -362,6 +362,8 @@ bool LoopPreVecPass::runImpl(Loop * L_, ScalarEvolution *SE_, TargetTransformInf
   
   auto innerLoops = L->getSubLoops();
 
+  dbgs() << "start loop prevec\n";
+
   if(innerLoops.size() == 0){
     LLVM_DEBUG(dbgs() << "found inner loop - " << L->getName() << " " << isSimple << " " << isLCSSA << "\n";);
     //L->print(dbgs(), 0, true);
@@ -369,6 +371,8 @@ bool LoopPreVecPass::runImpl(Loop * L_, ScalarEvolution *SE_, TargetTransformInf
   }
 
 
+  dbgs() << "end loop prevec\n";
+  
   return Changed;
 
 }
