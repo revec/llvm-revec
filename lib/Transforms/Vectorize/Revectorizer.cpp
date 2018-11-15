@@ -6995,7 +6995,13 @@ isShuffle(ArrayRef<Value *> VL) {
 
 
 static bool PhiTypeSorterFunc(Value *V, Value *V2) {
-  return V->getType() < V2->getType();
+
+  PHINode * p1 = dyn_cast<PHINode>(V);
+  PHINode * p2 = dyn_cast<PHINode>(V2);
+
+  assert(p1 && p2);
+  
+  return p1->getType() < p2->getType();
 }
 
 
@@ -7158,6 +7164,12 @@ bool RevectorizerPass::vectorizeChainsInBlock(BasicBlock *BB, BoUpSLP &R) {
       SmallVector<Value *, 4>::iterator SameTypeIt = IncIt;
       while (SameTypeIt != E &&
              (*SameTypeIt)->getType() == (*IncIt)->getType()) {
+
+	PHINode * p = dyn_cast<PHINode>(*SameTypeIt);
+	PHINode * pc = dyn_cast<PHINode>(*IncIt);
+
+	if(p->getNumIncomingValues() != pc->getNumIncomingValues()) break;
+	
         VisitedInstrs.insert(*SameTypeIt);
         ++SameTypeIt;
       }

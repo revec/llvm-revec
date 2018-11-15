@@ -119,9 +119,44 @@ namespace llvm{
     void splitReductionNodes();
     void createReductionChain();
     void printReductionChain();
+    Value* getIdentityVector();
 
   };
 };
+
+
+Value* Reduction::getIdentityVector(){
+
+  Instruction *firstRed = reductionChain[0];
+
+  Type *ty = firstRed->getType();
+
+  Value * ret = nullptr;
+
+  switch(reductionDesc.getRecurrenceKind()){
+    
+  case RecurrenceDescriptor::RK_IntegerAdd:
+    ret = Constant::getIntegerValue(ty, APInt(ty->getScalarSizeInBits(),0,true));
+    break;
+    
+  case RecurrenceDescriptor::RK_IntegerMinMax:
+    if(reductionDesc.getMinMaxRecurrenceKind() == RecurrenceDescriptor::MRK_UIntMin){
+      ret = Constant::getIntegerValue(ty, APInt(ty->getScalarSizeInBits(),-1,true));
+    }
+    else if(reductionDesc.getMinMaxRecurrenceKind() == RecurrenceDescriptor::MRK_UIntMax){
+      ret = Constant::getIntegerValue(ty, APInt(ty->getScalarSizeInBits(),0,true));
+    }
+    break;
+
+  default:
+    break;
+
+  }
+
+  return ret;
+
+
+}
 
 void Reduction::createReductionChain(){
 
@@ -169,6 +204,12 @@ void Reduction::splitReductionNodes(){
 
   if(reductionChain.size() < 2) return;
 
+  Value * retIdentity = getIdentityVector();
+
+  if(!retIdentity) return;
+
+  LLVM_DEBUG(dbgs() << "identity : " << *retIdentity << "\n");
+
   LLVM_DEBUG(dbgs() << "-----before change----\n";
 	     dbgs() << *phi->getParent() << "\n";);
 
@@ -208,7 +249,7 @@ void Reduction::splitReductionNodes(){
       
       Instruction * I = reductionChain[i];
       PHINode * newPhi = Builder.CreatePHI(phi->getType(), phi->getNumIncomingValues());      
-      newPhi->addIncoming(outsideValue, outsideBB);
+      newPhi->addIncoming(retIdentity, outsideBB);
       newPhi->addIncoming(I, curBB);
 
       //replace definitions
@@ -241,6 +282,10 @@ void Reduction::splitReductionNodes(){
 
     LLVM_DEBUG(dbgs() << "use empty: " << phi->use_empty() << "\n";);
 
+    //create a phi node for the original incoming value
+    PHINode * originalIncoming = Builder.CreatePHI(phi->getType(), 1);
+    originalIncoming->addIncoming(outsideValue, outsideBB);
+
     //remove the phi instruction
     if(phi->use_empty()){
       phi->eraseFromParent();
@@ -261,17 +306,27 @@ void Reduction::splitReductionNodes(){
 	LLVM_DEBUG(dbgs() << "-------before outside------\n";
 		   dbgs() << *outsideParent << "\n";);
 
-	//create a set of PHI's and then reduce
-	SmallVector<Instruction*, 16> phis;
 
+	
+	//create a set of PHI's and then reduce
+	SmallVector<Value*, 16> phis;
+
+	//create a phinode for the initial value
+	PHINode * init = Builder.CreatePHI(originalIncoming->getType(),2);
+	init->addIncoming(originalIncoming, curBB);
+	init->addIncoming(outsideValue, outsideBB);
+	
+	phis.push_back(init);
+	
 	for(unsigned i=0; i < reductionChain.size(); i++){
 	  PHINode * preRed = Builder.CreatePHI(reductionChain[i]->getType(),1);
 	  preRed->addIncoming(reductionChain[i],curBB);
 	  phis.push_back(preRed);
 	}
 
-	Instruction * first = phis[0];
-	Instruction * second = phis[1];
+	
+	Value * first = phis[0];
+	Value * second = phis[1];
 
 	Builder.SetInsertPoint(outsideParent->getFirstNonPHI());
 
@@ -321,7 +376,7 @@ bool LoopPreVecPass::identifyReductionPHI(){
     for(Instruction &I: *BB){
       if(PHINode * phi = dyn_cast<PHINode>(&I)){
 	RecurrenceDescriptor RedDes;
-	if(RecurrenceDescriptor::isReductionPHI(phi, L, RedDes, nullptr, AC, DT)){
+	if(RecurrenceDescriptor::isReductionPHI(phi, L, RedDes, nullptr, AC, DT) && isa<VectorType>(phi->getType())){
 	  reductions.push_back(new Reduction(phi, RedDes));
 	}
       } 
@@ -362,7 +417,7 @@ bool LoopPreVecPass::runImpl(Loop * L_, ScalarEvolution *SE_, TargetTransformInf
   
   auto innerLoops = L->getSubLoops();
 
-  dbgs() << "start loop prevec\n";
+  LLVM_DEBUG(dbgs() << "start loop prevec\n";);
 
   if(innerLoops.size() == 0){
     LLVM_DEBUG(dbgs() << "found inner loop - " << L->getName() << " " << isSimple << " " << isLCSSA << "\n";);
@@ -371,7 +426,7 @@ bool LoopPreVecPass::runImpl(Loop * L_, ScalarEvolution *SE_, TargetTransformInf
   }
 
 
-  dbgs() << "end loop prevec\n";
+  LLVM_DEBUG(dbgs() << "end loop prevec\n";);
   
   return Changed;
 
