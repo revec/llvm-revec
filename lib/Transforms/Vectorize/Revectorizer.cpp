@@ -5853,10 +5853,11 @@ static Value *createRdxShuffleMask(unsigned VecLen, unsigned NumEltsToRdx,
                                    IRBuilder<> &Builder);
 
 
- static void printBundle(ArrayRef<Value *> &V){
+ static void printBundle(ArrayRef<Value *> V){
    for(unsigned i = 0; i < V.size(); i++)
      REVEC_DEBUG(dbgs() << *V[i] << "\n");
  }
+
 
 namespace {
 
@@ -7183,7 +7184,30 @@ bool RevectorizerPass::vectorizeChainsInBlock(BasicBlock *BB, BoUpSLP &R) {
       // is done when there are exactly two elements since tryToVectorizeList
       // asserts that there are only two values when AllowReorder is true.
       bool AllowReorder = NumElts == 2;
-      if (NumElts > 1 && tryToVectorizeList(makeArrayRef(IncIt, NumElts), R,
+
+      //check for revec_reduce metadata
+
+      bool isReduction = false;
+      MDNode * md = (dyn_cast<PHINode>(*IncIt))->getMetadata("revec_reduce");
+
+      if(md){
+	MDString * md_string = dyn_cast<MDString>(md->getOperand(0));
+	bool isSame = true;
+	for(auto it = IncIt; it != SameTypeIt; it++){
+	  MDNode * md_next = (dyn_cast<PHINode>(*it))->getMetadata("revec_reduce");
+	  if(!md_next){ isSame = false; break;}
+	  MDString * md_next_string = dyn_cast<MDString>(md_next->getOperand(0));
+	  if(md_string->getString() != md_next_string->getString()){ isSame = false; break;}
+	}
+	isReduction = isSame;
+      }
+
+      REVEC_DEBUG(dbgs() << "isReduction : " << isReduction << "\n");
+      REVEC_DEBUG(dbgs() << " values : \n");
+      REVEC_DEBUG(printBundle(makeArrayRef(IncIt,NumElts)));
+      
+
+      if (NumElts > 1 && isReduction && tryToVectorizeList(makeArrayRef(IncIt, NumElts), R,
                                             /*UserCost=*/0, AllowReorder)) {
         // Success start over because instructions might have been changed.
         HaveVectorizedPhiNodes = true;
@@ -7385,7 +7409,7 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
 
   bool debugP = false;
   PHINode * P = dyn_cast<PHINode>(VL[0]);
-  LLVM_DEBUG(if(P){
+  REVEC_DEBUG(if(P){
     dbgs() << "[\n";
     for(unsigned i = 0; i < VL.size(); i++){
       dbgs() << *VL[i] << "\n";
@@ -7397,7 +7421,7 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
 
   //recalculate the vectorization factor
   unsigned VF = R.getMaxVecRegSize() / Sz;
-  LLVM_DEBUG(if(P){
+  REVEC_DEBUG(if(P){
     dbgs() << R.getMinVecRegSize() << " " << R.getMaxVecRegSize() << " " << Sz << "\n";
     dbgs() << "vec fac : " << VF << "\n";
 
@@ -7416,6 +7440,8 @@ bool RevectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
     }
     
     });
+
+
 
   bool Changed = false;
   bool CandidateFound = false;

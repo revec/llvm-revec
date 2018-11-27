@@ -67,6 +67,14 @@ using namespace llvm;
 
 #define DEBUG_TYPE "loop-prevec"
 
+//#define EXTRA_DEBUG
+
+#ifdef EXTRA_DEBUG
+#define PREVEC_DEBUG(x) LLVM_DEBUG(x)
+#else
+#define PREVEC_DEBUG(x)
+#endif
+
 
 void LoopPreVecPass::printLoop(){
 
@@ -100,6 +108,8 @@ void LoopPreVecPass::printLoop(){
   
 }
 
+
+
 namespace llvm{
 
   class Reduction{
@@ -115,14 +125,27 @@ namespace llvm{
     PHINode * phi;
     RecurrenceDescriptor reductionDesc;
     SmallVector<Instruction*, 32> reductionChain;
+    static int reduction_num;
 
-    void splitReductionNodes();
+    bool splitReductionNodes();
     void createReductionChain();
     void printReductionChain();
     Value* getIdentityVector();
 
   };
 };
+
+int Reduction::reduction_num = 0;
+
+
+void setReductionMetaData(Instruction * I){
+
+  LLVMContext& C = I->getContext();
+  MDNode * N = MDNode::get(C, MDString::get(C,std::to_string(Reduction::reduction_num)));
+  I->setMetadata("revec_reduce",N);
+
+}
+
 
 
 Value* Reduction::getIdentityVector(){
@@ -200,17 +223,17 @@ void Reduction::printReductionChain(){
 }
 
 
-void Reduction::splitReductionNodes(){
+bool Reduction::splitReductionNodes(){
 
-  if(reductionChain.size() < 2) return;
+  if(reductionChain.size() < 2) return false;
 
   Value * retIdentity = getIdentityVector();
 
-  if(!retIdentity) return;
+  if(!retIdentity) return false;
 
   LLVM_DEBUG(dbgs() << "identity : " << *retIdentity << "\n");
 
-  LLVM_DEBUG(dbgs() << "-----before change----\n";
+  PREVEC_DEBUG(dbgs() << "-----before change----\n";
 	     dbgs() << *phi->getParent() << "\n";);
 
   BasicBlock *curBB = phi->getParent();
@@ -252,6 +275,11 @@ void Reduction::splitReductionNodes(){
       newPhi->addIncoming(retIdentity, outsideBB);
       newPhi->addIncoming(I, curBB);
 
+      //set metadata
+      setReductionMetaData(I);
+      setReductionMetaData(newPhi);
+
+
       //replace definitions
       if(i == 0){
 	I->replaceUsesOfWith(phi,newPhi);
@@ -274,13 +302,17 @@ void Reduction::splitReductionNodes(){
 	  else{
 	    ICmp->replaceUsesOfWith(reductionChain[i-1],newPhi);
 	  }
+
+	  setReductionMetaData(ICmp);
+
 	}
       }
+
    
     }
 
 
-    LLVM_DEBUG(dbgs() << "use empty: " << phi->use_empty() << "\n";);
+    PREVEC_DEBUG(dbgs() << "use empty: " << phi->use_empty() << "\n";);
 
     //create a phi node for the original incoming value
     PHINode * originalIncoming = Builder.CreatePHI(phi->getType(), 1);
@@ -291,7 +323,7 @@ void Reduction::splitReductionNodes(){
       phi->eraseFromParent();
     }
 
-    LLVM_DEBUG(dbgs() << "---------after change-------\n";
+    PREVEC_DEBUG(dbgs() << "---------after change-------\n";
 	       dbgs() << *curBB << "\n";);
 
     //now do the reduction
@@ -303,7 +335,7 @@ void Reduction::splitReductionNodes(){
 	Instruction * insert = &*outsideParent->begin();
 	Builder.SetInsertPoint(insert);
 
-	LLVM_DEBUG(dbgs() << "-------before outside------\n";
+	PREVEC_DEBUG(dbgs() << "-------before outside------\n";
 		   dbgs() << *outsideParent << "\n";);
 
 
@@ -349,7 +381,7 @@ void Reduction::splitReductionNodes(){
 	I->replaceAllUsesWith(output);
 	I->eraseFromParent();
 
-	LLVM_DEBUG(dbgs() << "-------after outside------\n";
+	PREVEC_DEBUG(dbgs() << "-------after outside------\n";
 		   dbgs() << *outsideParent << "\n";);
 	break;
 
@@ -359,6 +391,12 @@ void Reduction::splitReductionNodes(){
   }
 
 
+  LLVM_DEBUG(BasicBlock * BB = reductionChain[0]->getParent();
+	     assert(BB);
+	     dbgs() << ".....Changed BB.....\n";
+	     dbgs() << *BB << "\n");
+
+  return true;
 
 }
 
@@ -383,13 +421,17 @@ bool LoopPreVecPass::identifyReductionPHI(){
     }    
   }
 
-  bool Changed = reductions.size() > 0;
+  bool Changed = false;
   
 
   for(unsigned i = 0; i < reductions.size(); i++){
     reductions[i]->createReductionChain();
     LLVM_DEBUG(reductions[i]->printReductionChain(););
-    reductions[i]->splitReductionNodes();
+    bool splitted = reductions[i]->splitReductionNodes();
+    if(splitted){
+      Reduction::reduction_num++;
+    }
+    Changed |= splitted;
     delete reductions[i];
   }
 
