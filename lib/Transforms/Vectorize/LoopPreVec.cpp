@@ -202,6 +202,9 @@ void Reduction::createReductionChain(){
       }
     }
 
+    if(reductionDesc.getLoopExitInstr()->getParent() != ParentBB)
+      break;
+
     if(I == reductionDesc.getLoopExitInstr())
       break;
   
