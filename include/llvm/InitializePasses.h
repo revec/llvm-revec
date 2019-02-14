@@ -341,6 +341,7 @@ void initializeRenameIndependentSubregsPass(PassRegistry&);
 void initializeResetMachineFunctionPass(PassRegistry&);
 void initializeRevectorizerPass(PassRegistry&);
 void initializeRevecAnalysisPassPass(PassRegistry&);
+void initializeLoopPreVecPass(PassRegistry&);
 void initializeReversePostOrderFunctionAttrsLegacyPassPass(PassRegistry&);
 void initializeRewriteStatepointsForGCLegacyPassPass(PassRegistry &);
 void initializeRewriteSymbolsLegacyPassPass(PassRegistry&);

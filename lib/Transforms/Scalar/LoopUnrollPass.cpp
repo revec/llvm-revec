@@ -1087,6 +1087,11 @@ static LoopUnrollResult tryToUnrollLoop(
   if (TripCount && UP.Count > TripCount)
     UP.Count = TripCount;
 
+  // maximum factor for unrolling is 4 sse2 -> avx512
+  if(UP.Count > 4){
+    UP.Count = 4;
+  }
+
   // Unroll the loop.
   LoopUnrollResult UnrollResult = UnrollLoop(
       L, UP.Count, TripCount, UP.Force, UP.Runtime, UP.AllowExpensiveTripCount,

@@ -42,6 +42,7 @@
 #include "llvm/Transforms/Scalar/SimpleLoopUnswitch.h"
 #include "llvm/Transforms/Utils.h"
 #include "llvm/Transforms/Vectorize.h"
+#include "llvm/Transforms/Vectorize/LoopPreVec.h"
 
 using namespace llvm;
 
@@ -58,8 +59,16 @@ RunSLPVectorization("vectorize-slp", cl::Hidden,
                     cl::desc("Run the SLP vectorization passes"));
 
 static cl::opt<bool>
-RunRevectorization("vectorize-revec", cl::Hidden,
+RunRevectorization("vectorize-revec", cl::init(false), cl::Hidden,
                     cl::desc("Run the revectorization passes"));
+
+static cl::opt<bool>
+RunRevectorizationLocal("run-revec", cl::init(false), cl::Hidden,
+                    cl::desc("Run the revectorization passes"));
+
+static cl::opt<bool>
+RunLoopPrevec("loop-prevec", cl::Hidden,
+                    cl::desc("Run loop transformations prevectorization"));
 
 static cl::opt<bool>
 UseGVNAfterVectorization("use-gvn-after-vectorization",
@@ -165,6 +174,8 @@ PassManagerBuilder::PassManagerBuilder() {
     SLPVectorize = RunSLPVectorization;
     LoopVectorize = RunLoopVectorization;
     Revectorize = RunRevectorization;
+    RevectorizeLocal = RunRevectorizationLocal;
+    LoopPrevec = RunLoopPrevec;
     RerollLoops = RunLoopRerolling;
     NewGVN = RunNewGVN;
     DisableGVNLoadPRE = false;
@@ -411,8 +422,11 @@ void PassManagerBuilder::addFunctionSimplificationPasses(
   if (!RunSLPAfterLoopVectorization) {
     if (SLPVectorize)
       MPM.add(createSLPVectorizerPass()); // Vectorize parallel scalar chains.
-    if (Revectorize)
-      MPM.add(createRevectorizerPass()); // Widen parallel vector intrinsic chains.
+      if(LoopPrevec)
+	MPM.add(createLoopPreVecPass());
+      if(RevectorizeLocal)
+	MPM.add(createRevectorizerPass()); // Widen parallel vector intrinsic chains.
+ 
   }
 
   MPM.add(createAggressiveDCEPass());         // Delete dead instructions
@@ -674,8 +688,11 @@ void PassManagerBuilder::populateModulePassManager(
   if (RunSLPAfterLoopVectorization && (SLPVectorize || Revectorize)) {
     if (SLPVectorize)
       MPM.add(createSLPVectorizerPass()); // Vectorize parallel scalar chains.
-    if (Revectorize)
+    if(LoopPrevec)
+      MPM.add(createLoopPreVecPass());
+    if(RevectorizeLocal)
       MPM.add(createRevectorizerPass()); // Widen parallel vector intrinsic chains.
+    
     if (OptLevel > 1 && ExtraVectorizerPasses) {
       MPM.add(createEarlyCSEPass());
     }
@@ -883,8 +900,11 @@ void PassManagerBuilder::addLTOOptimizationPasses(legacy::PassManagerBase &PM) {
   if (RunSLPAfterLoopVectorization) {
     if (SLPVectorize)
       PM.add(createSLPVectorizerPass()); // Vectorize parallel scalar chains.
-    if (Revectorize)
+    if(LoopPrevec)
+      PM.add(createLoopPreVecPass());
+    if(RevectorizeLocal)
       PM.add(createRevectorizerPass()); // Widen parallel vector intrinsic chains.
+    
   }
 
   // After vectorization, assume intrinsics may tell us more about pointer
